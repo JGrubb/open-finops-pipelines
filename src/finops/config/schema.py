@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field, ConfigDict
 class AWSConfig(BaseModel):
     bucket: str = Field(..., description="S3 bucket containing CUR files")
     export_name: str = Field(..., description="Name of the CUR export")
-    prefix: str = Field("", description="S3 prefix/path to CUR files")
+    prefix: str = Field(..., description="S3 prefix/path to CUR files")
     cur_version: str = Field("v1", description="CUR version v1|v2")
     access_key_id: Optional[str] = Field(None, description="AWS access key ID")
     secret_access_key: Optional[str] = Field(None, description="AWS secret access key")
