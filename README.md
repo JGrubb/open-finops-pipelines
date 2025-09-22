@@ -1,140 +1,129 @@
-# Open Finops Pipelines
+# Open FinOps Pipelines
 
-This is an open source project to implement data pipelines that will ingest billing data from cloud vendors - AWS and Azure for starters - and load it into arbitrary analytical databases for analysis - DuckDB for local analysis and BigQuery as a cloud warehouse (for starters).
+A lightweight, vendor-agnostic tool for ingesting cloud billing data into analytical databases. Built with simplicity, testability, and minimal dependencies in mind.
 
-We'll be proceeding with development in very small steps, and following a test driven development pattern: 
-- Write tests for desired functionality
-- Ensure that tests fail
-- Implement the missing functionality
-- Ensure the tests pass
+## Vision
 
-This will be a python project.  We'll use uv as the package manager and for handling virtualenvs.
+Transform cloud billing data from multiple vendors (AWS, Azure) into queryable datasets for FinOps analysis, using local databases (DuckDB) or cloud warehouses (BigQuery) as analytical backends.
 
-## CLI API Design
+## Architecture
 
-The API of the CLI interface for the project is as follows:
+```
+┌─────────────┐    ┌──────────────┐    ┌─────────────┐
+│   Vendors   │    │  Pipeline    │    │  Backends   │
+│             │────│              │────│             │
+│ • AWS CUR   │    │ • Discovery  │    │ • DuckDB    │
+│ • Azure     │    │ • State Mgmt │    │ • BigQuery  │
+└─────────────┘    │ • Processing │    └─────────────┘
+                   └──────────────┘
+```
 
-### Core Commands
+**Core Principles:**
+- **Vendor-agnostic**: Common interface for AWS, Azure, and future cloud providers
+- **Backend-flexible**: Support local (DuckDB) and cloud (BigQuery) analytical databases
+- **State-aware**: Track processing to avoid reprocessing and enable resume
+- **Test-driven**: Comprehensive test coverage with TDD development approach
+- **Minimal dependencies**: Use Python standard library when possible
+
+## Quick Start
 
 ```bash
-# Primary import command (planned for Phase 2B)
-./finops aws import-billing [OPTIONS]
+# Install and configure
+uv sync
+cp config.example.toml config.toml  # Edit with your settings
 
-# Manifest exploration ✅ IMPLEMENTED
-./finops aws list-manifests [OPTIONS]
+# Discover available billing data
+finops aws list-manifests --bucket my-cur-bucket --export-name my-export
 
-# State inspection ✅ IMPLEMENTED
-./finops aws show-state [OPTIONS] # shows previous executions of the pipeline and their state
+# Check pipeline state
+finops aws show-state
+
+# Import billing data (coming in Phase 2B)
+finops aws import-billing --start-date 2024-01 --end-date 2024-03
 ```
 
-### CLI Arguments
+## Project Structure
 
-**Required (via config.toml, environment, or CLI):**
-- `--bucket, -b`: S3 bucket containing CUR files
-- `--export-name, -n`: Name of the CUR export
-- AWS credentials (access key, secret key, region)
-
-**Optional:**
-- `--config, -c`: Path to config.toml file (default: ./config.toml)
-- `--prefix, -p`: S3 prefix/path to CUR files (default: "")
-- `--cur-version, -v`: CUR version v1|v2 (default: v1)
-- `--export-format, -f`: File format csv|parquet (default: auto-detect)
-- `--start-date, -s`: Start date YYYY-MM for import (default: all available)
-- `--end-date, -e`: End date YYYY-MM for import (default: all available)
-- `--reset, -r`: Drop existing tables before import
-- `--include-processed`: Show already processed manifests in list-manifests
-
-**Configuration Precedence:**
-1. CLI arguments (highest priority)
-2. Environment variables (OPEN_FINOPS_AWS_*)
-3. config.toml file
-4. Defaults (lowest priority)
-
-## AWS CUR Business Logic
-
-### Manifest Discovery
-
-AWS CUR uses manifest files to track billing exports:
-
-**CUR v1 Structure:**
 ```
-s3://bucket/prefix/export-name/YYYYMMDD-YYYYMMDD/
-├── export-name-Manifest.json          # Manifest file
-├── export-name-00001.csv.gz           # Data files
-├── export-name-00002.csv.gz
-└── ...
+src/finops/
+├── vendors/           # Cloud provider integrations
+│   └── aws/          # AWS CUR discovery and parsing
+├── backends/         # Database integrations (future)
+├── state/            # Pipeline state management
+├── config/           # Configuration handling
+└── cli/              # Command-line interface
 ```
 
-**CUR v2 Structure:**
-```
-s3://bucket/prefix/export-name/year=YYYY/month=MM/
-├── export-name-Manifest.json          # Manifest file
-├── part-00000-*.parquet               # Data files
-├── part-00001-*.parquet
-└── ...
-```
+## Development Philosophy
 
-Azure manifest discovery is TBD, but plan on using a very similar algorithm to handle Azure billing data.
+### Test-Driven Development
+Every feature follows the TDD cycle:
+1. Write failing tests first
+2. Implement minimal code to pass
+3. Refactor while keeping tests green
 
-### Manifest Business Rules
+### Small, Focused Changes
+- Each commit addresses a single concern
+- Features developed incrementally
+- Clear separation between vendors and backends
 
-1. **Discovery Pattern**: Find manifests by listing S3 objects with pattern `*-Manifest.json`
-2. **Date Filtering**: Filter manifests by billing period (YYYY-MM format)
-3. **Version Detection**: Detect CUR version from manifest structure and file types
-4. **Assembly Tracking**: Each manifest has an assembly ID for versioning
-5. **File Enumeration**: Manifest contains list of actual data files to process
+### Idiomatic Python
+- Follow Python conventions and best practices
+- Use type hints and Pydantic for validation
+- Leverage standard library before adding dependencies
 
-### Data Processing Logic
+### Minimal Dependencies
+Current production dependencies:
+- `boto3` - AWS SDK (only dependency)
+- `pydantic` - Configuration validation
+- Standard library for everything else (SQLite, JSON, etc.)
 
-1. **File Format Detection**: Auto-detect CSV vs Parquet from file extensions
-2. **Progress Tracking**: Report progress per manifest and per file
-3. **Error Handling**: Skip missing files, fail on permission errors
-4. **Row Counting**: Track and report row counts for monitoring
+## Configuration
 
-## Configuration Schema
+Flexible configuration with clear precedence:
 
 ```toml
+# config.toml
 [aws]
-bucket = "my-cur-bucket"
-prefix = "cur-exports"
+bucket = "my-billing-bucket"
 export_name = "my-cur-export"
-cur_version = "v1"
-access_key_id = "${AWS_ACCESS_KEY_ID}"
-secret_access_key = "${AWS_SECRET_ACCESS_KEY}"
 region = "us-east-1"
-start_date = "2024-01"
-end_date = "2024-12"
-dataset_name = "aws_billing"
-
-[database]
-backend = "duckdb"
-[database.duckdb]
-database_path = "./data/finops.duckdb"
 
 [state]
 database_path = "./data/pipeline_state.db"
 ```
 
-## 🚀 Implementation Status
+**Precedence**: CLI args > Environment variables > config.toml > defaults
 
-### ✅ Phase 1: Foundation (Completed)
-- CLI framework with AWS subcommands
-- Configuration system (TOML, environment, CLI args)
-- AWS client and S3 connectivity
-- Manifest discovery and parsing
-- Comprehensive test coverage
+## Current Status
 
-### ✅ Phase 2A: Pipeline State Database (Completed)
-- **Daily Workflow**: `list-manifests` discovers and tracks new manifests
-- **State Management**: SQLite-based tracking of processed billing data
-- **Smart Skipping**: Avoid reprocessing already-seen manifests
-- **CLI Integration**: `show-state` command for pipeline visibility
-- **TDD Implementation**: 44 tests passing, zero additional dependencies
+### ✅ Phase 1: Foundation (Complete)
+- Modular CLI with AWS subcommands
+- Configuration system with precedence handling
+- Comprehensive test suite (44 tests passing)
 
-### 🔄 Next: Phase 2B: Data Pipeline Implementation
-- Implement actual data loading (`import-billing` command)
+### ✅ Phase 2A: AWS Integration & State Management (Complete)
+- AWS CUR manifest discovery (v1 and v2 support)
+- SQLite-based state tracking
+- Smart duplicate detection and skipping
+
+### 🔄 Phase 2B: Data Pipeline (Next)
 - DuckDB integration for local analytics
-- State transitions (discovered → loading → loaded/failed)
-- Error handling and resume capabilities
+- Actual data import from CUR files
+- State transitions and error handling
 
-The foundation is solid and ready for data pipeline implementation!
+### 🔮 Future Phases
+- Azure billing integration
+- BigQuery backend support
+- Advanced features (incremental updates, monitoring)
+
+## Contributing
+
+This project follows strict TDD practices. Before implementing any feature:
+
+1. Read the planning documents in `planning/`
+2. Write comprehensive tests first
+3. Implement the minimal code to pass tests
+4. Ensure all existing tests continue to pass
+
+Run tests with `uv run test` before submitting changes.
