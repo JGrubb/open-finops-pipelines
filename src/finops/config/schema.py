@@ -19,6 +19,10 @@ class DuckDBConfig(BaseModel):
     database_path: str = Field("./data/finops.duckdb", description="Path to DuckDB database file")
 
 
+class StateConfig(BaseModel):
+    database_path: str = Field("./data/pipeline_state.db", description="Path to pipeline state database file")
+
+
 class DatabaseConfig(BaseModel):
     backend: str = Field("duckdb", description="Database backend type")
     duckdb: DuckDBConfig = Field(default_factory=DuckDBConfig)
@@ -32,3 +36,4 @@ class FinopsConfig(BaseModel):
 
     aws: AWSConfig
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    state: StateConfig = Field(default_factory=StateConfig)
