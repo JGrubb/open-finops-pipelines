@@ -1,0 +1,21 @@
+[project]
+name = "finops"
+version = "0.1.0"
+description = "Open source FinOps data pipelines for cloud billing analysis"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+finops = "finops.cli:main"
+test = "pytest:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+]
+
