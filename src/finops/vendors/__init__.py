@@ -1,0 +1,1 @@
+"""Cloud vendor integrations for FinOps pipelines."""
