@@ -1,6 +1,8 @@
 """AWS CLI commands."""
 
 import argparse
+from finops.vendors.aws.client import AWSClient
+from finops.vendors.aws.manifest import ManifestDiscovery
 
 
 def setup_aws_parser(subparsers):
@@ -97,9 +99,45 @@ def import_billing_command(config, args):
 
 def list_manifests_command(config, args):
     """List available CUR manifest files."""
-    print(f"Listing manifests from bucket: {config.aws.bucket}")
-    print(f"Export name: {config.aws.export_name}")
-    # TODO: Implement actual manifest listing logic
+    try:
+        # Create AWS client
+        aws_client = AWSClient(config.aws)
+
+        # Test connection first
+        print(f"Connecting to S3 bucket: {config.aws.bucket}")
+        aws_client.test_connection()
+        print("✓ Connection successful")
+
+        # Discover manifests
+        discovery = ManifestDiscovery(aws_client)
+        print(f"Discovering manifests for export: {config.aws.export_name}")
+
+        start_date = getattr(args, 'start_date', None) or config.aws.start_date
+        end_date = getattr(args, 'end_date', None) or config.aws.end_date
+
+        manifests = discovery.discover_manifests(start_date=start_date, end_date=end_date)
+
+        if not manifests:
+            print("No manifests found matching the criteria")
+            return
+
+        print(f"\nFound {len(manifests)} manifest(s):")
+        print("-" * 80)
+
+        for manifest in manifests:
+            print(f"Billing Period: {manifest.billing_period}")
+            print(f"Assembly ID: {manifest.assembly_id}")
+            print(f"CUR Version: {manifest.cur_version.value}")
+            print(f"Files: {len(manifest.files)}")
+            if manifest.files:
+                total_size = sum(f.size for f in manifest.files)
+                print(f"Total Size: {total_size:,} bytes")
+            print(f"Format: {manifest.format or 'Unknown'}")
+            print("-" * 80)
+
+    except Exception as e:
+        print(f"Error: {e}")
+        return 1
 
 
 def show_state_command(config, args):
