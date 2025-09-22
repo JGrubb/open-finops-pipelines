@@ -2,7 +2,7 @@
 
 ## Project Status
 
-**Current State**: Early development with basic CLI foundation
+**Current State**: Configuration system complete, ready for AWS CUR discovery
 
 **Completed**:
 - ✅ Basic uv project structure with console script entry point
@@ -10,15 +10,25 @@
 - ✅ AWS subcommand structure (`finops aws --help`)
 - ✅ Test framework setup with `uv run test` shortcut
 - ✅ TDD workflow established
+- ✅ Configuration system with TOML, environment variables, and CLI precedence
+- ✅ AWS CLI commands: import-billing, list-manifests, show-state
+- ✅ Argument parsing for all required and optional parameters
+- ✅ Pydantic validation and schema management
 
-## Phase 1: CLI Foundation (In Progress)
+## Phase 1: CLI Foundation (Complete)
+
+### Recently Completed
+- ✅ Add AWS import-billing command structure
+- ✅ Add AWS list-manifests command structure
+- ✅ Add AWS show-state command structure
+- ✅ Implement basic argument parsing for required options (bucket, export-name)
+- ✅ Add configuration file support (config.toml)
+- ✅ Environment variable support with OFS_ prefix
+- ✅ Configuration precedence: CLI > env vars > config.toml > defaults
 
 ### Next Steps
-- [ ] Add AWS import-billing command structure
-- [ ] Add AWS list-manifests command structure
-- [ ] Add AWS show-state command structure
-- [ ] Implement basic argument parsing for required options (bucket, export-name)
-- [ ] Add configuration file support (config.toml)
+- [ ] Add config command to display current configuration
+- [ ] Validation and error handling improvements
 
 ## Phase 2: AWS CUR Discovery
 
