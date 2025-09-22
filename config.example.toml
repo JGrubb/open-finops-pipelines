@@ -1,0 +1,57 @@
+# Open FinOps Pipelines - Configuration Example
+# Copy this file to config.toml and customize for your environment
+
+[aws]
+# Required: S3 bucket containing your CUR export files
+bucket = "my-billing-bucket"
+
+# Required: Name of your CUR export (as configured in AWS Billing Console)
+export_name = "my-cur-export"
+
+# Optional: S3 prefix/path to CUR files (empty string means root of bucket)
+prefix = ""
+
+# Optional: CUR version - auto-detected if not specified
+cur_version = "v1"  # "v1" or "v2"
+
+# Optional: AWS credentials (if not using environment variables or IAM roles)
+# access_key_id = "your-access-key-id"
+# secret_access_key = "your-secret-access-key"
+
+# Optional: AWS region
+region = "us-east-1"
+
+# Optional: Date range for processing (YYYY-MM format)
+# start_date = "2024-01"
+# end_date = "2024-12"
+
+# Optional: Dataset name for analytics
+dataset_name = "aws_billing"
+
+[database]
+# Database backend type
+backend = "duckdb"
+
+[database.duckdb]
+# Path to local DuckDB database file
+database_path = "./data/finops.duckdb"
+
+[state]
+# Path to pipeline state tracking database
+database_path = "./data/pipeline_state.db"
+
+# Example: Using environment variables instead of hardcoded values
+# You can reference environment variables using ${VAR_NAME} syntax:
+#
+# [aws]
+# bucket = "${AWS_CUR_BUCKET}"
+# export_name = "${AWS_CUR_EXPORT_NAME}"
+# access_key_id = "${AWS_ACCESS_KEY_ID}"
+# secret_access_key = "${AWS_SECRET_ACCESS_KEY}"
+# region = "${AWS_DEFAULT_REGION}"
+
+# Configuration Precedence (highest to lowest):
+# 1. CLI arguments (--bucket, --export-name, etc.)
+# 2. Environment variables (OFS_AWS_BUCKET, OFS_AWS_EXPORT_NAME, etc.)
+# 3. This config.toml file
+# 4. Built-in defaults
