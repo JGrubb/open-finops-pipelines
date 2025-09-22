@@ -17,13 +17,13 @@ The API of the CLI interface for the project is as follows:
 ### Core Commands
 
 ```bash
-# Primary import command
+# Primary import command (planned for Phase 2B)
 ./finops aws import-billing [OPTIONS]
 
-# Manifest exploration
+# Manifest exploration ✅ IMPLEMENTED
 ./finops aws list-manifests [OPTIONS]
 
-# State inspection
+# State inspection ✅ IMPLEMENTED
 ./finops aws show-state [OPTIONS] # shows previous executions of the pipeline and their state
 ```
 
@@ -42,6 +42,7 @@ The API of the CLI interface for the project is as follows:
 - `--start-date, -s`: Start date YYYY-MM for import (default: all available)
 - `--end-date, -e`: End date YYYY-MM for import (default: all available)
 - `--reset, -r`: Drop existing tables before import
+- `--include-processed`: Show already processed manifests in list-manifests
 
 **Configuration Precedence:**
 1. CLI arguments (highest priority)
@@ -109,4 +110,31 @@ dataset_name = "aws_billing"
 backend = "duckdb"
 [database.duckdb]
 database_path = "./data/finops.duckdb"
+
+[state]
+database_path = "./data/pipeline_state.db"
 ```
+
+## 🚀 Implementation Status
+
+### ✅ Phase 1: Foundation (Completed)
+- CLI framework with AWS subcommands
+- Configuration system (TOML, environment, CLI args)
+- AWS client and S3 connectivity
+- Manifest discovery and parsing
+- Comprehensive test coverage
+
+### ✅ Phase 2A: Pipeline State Database (Completed)
+- **Daily Workflow**: `list-manifests` discovers and tracks new manifests
+- **State Management**: SQLite-based tracking of processed billing data
+- **Smart Skipping**: Avoid reprocessing already-seen manifests
+- **CLI Integration**: `show-state` command for pipeline visibility
+- **TDD Implementation**: 44 tests passing, zero additional dependencies
+
+### 🔄 Next: Phase 2B: Data Pipeline Implementation
+- Implement actual data loading (`import-billing` command)
+- DuckDB integration for local analytics
+- State transitions (discovered → loading → loaded/failed)
+- Error handling and resume capabilities
+
+The foundation is solid and ready for data pipeline implementation!
