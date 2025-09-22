@@ -12,7 +12,8 @@ def test_load_config_from_dict():
     """Test loading config from dictionary (CLI args)."""
     cli_args = {
         "bucket": "test-bucket",
-        "export_name": "test-export"
+        "export_name": "test-export",
+        "prefix": "test-prefix"
     }
 
     config = load_config(cli_args=cli_args)
@@ -88,6 +89,7 @@ def test_load_config_env_variables():
     env_vars = {
         "OFS_AWS_BUCKET": "env-bucket",
         "OFS_AWS_EXPORT_NAME": "env-export",
+        "OFS_AWS_PREFIX": "env-prefix",
         "OFS_AWS_REGION": "eu-west-1"
     }
 
@@ -103,7 +105,8 @@ def test_load_config_precedence_cli_over_env():
     """Test that CLI arguments override environment variables."""
     env_vars = {
         "OFS_AWS_BUCKET": "env-bucket",
-        "OFS_AWS_EXPORT_NAME": "env-export"
+        "OFS_AWS_EXPORT_NAME": "env-export",
+        "OFS_AWS_PREFIX": "env-prefix"
     }
 
     with patch.dict(os.environ, env_vars):
@@ -121,7 +124,8 @@ def test_load_config_nonexistent_file():
     """Test loading config when file doesn't exist but required fields provided via CLI."""
     cli_args = {
         "bucket": "test-bucket",
-        "export_name": "test-export"
+        "export_name": "test-export",
+        "prefix": "test-prefix"
     }
 
     config = load_config(config_path="/nonexistent/config.toml", cli_args=cli_args)
@@ -138,7 +142,7 @@ def test_load_config_cli_args_none_values_ignored():
     cli_args = {
         "bucket": "test-bucket",
         "export_name": "test-export",
-        "prefix": None,  # Should be ignored
+        "prefix": "test-prefix",  # Required field
         "region": None   # Should be ignored
     }
 
@@ -146,5 +150,5 @@ def test_load_config_cli_args_none_values_ignored():
 
     assert config.aws.bucket == "test-bucket"
     assert config.aws.export_name == "test-export"
-    assert config.aws.prefix == ""  # Default value
+    assert config.aws.prefix == "test-prefix"  # Required field
     assert config.aws.region == "us-east-1"  # Default value
