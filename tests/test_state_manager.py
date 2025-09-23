@@ -177,3 +177,139 @@ class TestFutureProcessingQueries:
         assert "ready-001" in ready_ids
         assert "ready-002" in ready_ids
         assert "done-003" not in ready_ids
+
+    def test_get_pipeline_ready_manifests_latest_per_month(self, state_manager):
+        """
+        Test: Get only the latest manifest per billing month for pipeline processing.
+        Scenario: Multiple manifests exist for same billing month (newer versions).
+        Expected: Return only the latest manifest per month based on created_at timestamp.
+        """
+        # Set up multiple manifests for same billing month
+        # First manifest for 2024-01
+        state_manager.record_discovered("aws", "assembly-001", "2024-01", "export-1")
+
+        # Second manifest for same month (newer)
+        state_manager.record_discovered("aws", "assembly-002", "2024-01", "export-1")
+
+        # Third manifest for same month (newest)
+        state_manager.record_discovered("aws", "assembly-003", "2024-01", "export-1")
+
+        # One manifest for different month
+        state_manager.record_discovered("aws", "assembly-004", "2024-02", "export-1")
+
+        # Query for pipeline-ready manifests (latest per month only)
+        pipeline_manifests = state_manager.get_pipeline_ready_manifests("aws")
+
+        # Should return only 2 manifests: latest from 2024-01 and the one from 2024-02
+        assert len(pipeline_manifests) == 2
+
+        # Extract details for verification
+        pipeline_ids = [m.billing_version_id for m in pipeline_manifests]
+        pipeline_months = [m.billing_month for m in pipeline_manifests]
+
+        # Should include latest from 2024-01 (assembly-003) and 2024-02 (assembly-004)
+        assert "assembly-003" in pipeline_ids  # Latest for 2024-01
+        assert "assembly-004" in pipeline_ids  # Only one for 2024-02
+        assert "assembly-001" not in pipeline_ids  # Older version for 2024-01
+        assert "assembly-002" not in pipeline_ids  # Older version for 2024-01
+
+        # Verify both months are represented
+        assert "2024-01" in pipeline_months
+        assert "2024-02" in pipeline_months
+
+    def test_get_pipeline_ready_manifests_different_months(self, state_manager):
+        """
+        Test: Get manifests from different billing months.
+        Scenario: One manifest per month across multiple months.
+        Expected: Return all manifests since each is latest for its month.
+        """
+        # Set up manifests for different months
+        state_manager.record_discovered("aws", "jan-assembly", "2024-01", "export-1")
+        state_manager.record_discovered("aws", "feb-assembly", "2024-02", "export-1")
+        state_manager.record_discovered("aws", "mar-assembly", "2024-03", "export-1")
+
+        # Query for pipeline-ready manifests
+        pipeline_manifests = state_manager.get_pipeline_ready_manifests("aws")
+
+        # Should return all 3 since each is the only/latest for its month
+        assert len(pipeline_manifests) == 3
+
+        pipeline_ids = [m.billing_version_id for m in pipeline_manifests]
+        pipeline_months = [m.billing_month for m in pipeline_manifests]
+
+        # All should be included
+        assert "jan-assembly" in pipeline_ids
+        assert "feb-assembly" in pipeline_ids
+        assert "mar-assembly" in pipeline_ids
+
+        # All months should be represented
+        assert "2024-01" in pipeline_months
+        assert "2024-02" in pipeline_months
+        assert "2024-03" in pipeline_months
+
+    def test_get_pipeline_ready_manifests_empty_discovered(self, state_manager):
+        """
+        Test: Get manifests when no manifests are in discovered state.
+        Scenario: Database has manifests but all are in 'loaded' state.
+        Expected: Return empty list.
+        """
+        # Set up manifests that are already processed
+        state_manager.record_discovered("aws", "processed-001", "2024-01", "export-1")
+        state_manager.mark_completed("aws", "processed-001")
+
+        state_manager.record_discovered("aws", "processed-002", "2024-02", "export-1")
+        state_manager.mark_completed("aws", "processed-002")
+
+        # Query for pipeline-ready manifests
+        pipeline_manifests = state_manager.get_pipeline_ready_manifests("aws")
+
+        # Should return empty list since no manifests are in "discovered" state
+        assert len(pipeline_manifests) == 0
+        assert pipeline_manifests == []
+
+    def test_get_pipeline_ready_manifests_include_failed(self, state_manager):
+        """
+        Test: Get manifests including failed states for retry capability.
+        Scenario: Mix of discovered, loaded, and failed manifests.
+        Expected:
+        - include_failed=False (default): return only discovered
+        - include_failed=True: return both discovered and failed
+        """
+        # Set up manifests in various states
+        state_manager.record_discovered("aws", "discovered-001", "2024-01", "export-1")
+        state_manager.record_discovered("aws", "discovered-002", "2024-02", "export-1")
+
+        # One completed (should never be included)
+        state_manager.record_discovered("aws", "completed-003", "2024-03", "export-1")
+        state_manager.mark_completed("aws", "completed-003")
+
+        # One failed (should be included only when include_failed=True)
+        # Note: We'll need to implement mark_failed method, for now simulate with direct state update
+        failed_record = state_manager.record_discovered("aws", "failed-004", "2024-04", "export-1")
+        # TODO: Replace with proper mark_failed method when implemented
+        from finops.state.database import get_connection
+        with get_connection(state_manager.database_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE billing_state SET state = 'failed' WHERE billing_version_id = ?",
+                ("failed-004",)
+            )
+            conn.commit()
+
+        # Test default behavior (include_failed=False)
+        discovered_only = state_manager.get_pipeline_ready_manifests("aws")
+        assert len(discovered_only) == 2
+        discovered_ids = [m.billing_version_id for m in discovered_only]
+        assert "discovered-001" in discovered_ids
+        assert "discovered-002" in discovered_ids
+        assert "completed-003" not in discovered_ids
+        assert "failed-004" not in discovered_ids
+
+        # Test include_failed=True
+        with_failed = state_manager.get_pipeline_ready_manifests("aws", include_failed=True)
+        assert len(with_failed) == 3
+        with_failed_ids = [m.billing_version_id for m in with_failed]
+        assert "discovered-001" in with_failed_ids
+        assert "discovered-002" in with_failed_ids
+        assert "failed-004" in with_failed_ids  # Now included for retry
+        assert "completed-003" not in with_failed_ids  # Still excluded

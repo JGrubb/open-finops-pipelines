@@ -118,6 +118,41 @@ class StateManager:
             rows = cursor.fetchall()
             return [self._row_to_record(row) for row in rows]
 
+    def get_pipeline_ready_manifests(self, vendor: str, include_failed: bool = False) -> List[StateRecord]:
+        """Get latest manifest per billing month in 'discovered' (and optionally 'failed') state."""
+        from .database import get_connection
+
+        with get_connection(self.database_path) as conn:
+            cursor = conn.cursor()
+
+            # Build the state filter based on include_failed parameter
+            if include_failed:
+                state_filter = "state IN ('discovered', 'failed')"
+                state_params = (vendor,)
+            else:
+                state_filter = "state = 'discovered'"
+                state_params = (vendor,)
+
+            # Use window function to get only the latest manifest per billing month
+            query = f"""
+                WITH ranked_manifests AS (
+                    SELECT *,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY billing_month
+                               ORDER BY created_at DESC, billing_version_id DESC
+                           ) as rn
+                    FROM billing_state
+                    WHERE vendor = ? AND {state_filter}
+                )
+                SELECT * FROM ranked_manifests
+                WHERE rn = 1
+                ORDER BY billing_month
+            """
+
+            cursor.execute(query, state_params)
+            rows = cursor.fetchall()
+            return [self._row_to_record(row) for row in rows]
+
     def _row_to_record(self, row) -> StateRecord:
         """Convert SQLite row to StateRecord."""
         return StateRecord(
