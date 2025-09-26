@@ -1,13 +1,11 @@
-import duckdb
 import json
 import gzip
 import csv
 from pathlib import Path
 from typing import Dict, List, Optional, Set
-from datetime import datetime
-
+import duckdb
 from finops.services.state_db import StateDB
-from finops.services.schema_manager import SchemaManager, ColumnDefinition
+from finops.services.schema_manager import SchemaManager
 
 
 class DuckDBLoader:
@@ -17,20 +15,22 @@ class DuckDBLoader:
         self.database_path = database_path
         self.state_db = state_db
         self.schema_manager = SchemaManager(state_db)
-        self.connection = None
+        self.connection: Optional[duckdb.DuckDBPyConnection] = None
 
     def __enter__(self):
         """Context manager entry."""
         self.connection = duckdb.connect(self.database_path)
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, _exc_type, _exc_val, _exc_tb):
         """Context manager exit."""
         if self.connection:
             self.connection.close()
 
     def get_existing_table_columns(self, table_name: str) -> Set[str]:
         """Get set of column names from existing table."""
+        if not self.connection:
+            raise RuntimeError("Connection not established. Use within context manager.")
         try:
             result = self.connection.execute(f"""
                 SELECT column_name
@@ -55,6 +55,8 @@ class DuckDBLoader:
             print(f"Creating new table: {table_name}")
             full_schema = self.schema_manager.get_unified_schema()
             create_sql = self.schema_manager.generate_create_table_sql(table_name, full_schema)
+            if not self.connection:
+                raise RuntimeError("Connection not established. Use within context manager.")
             self.connection.execute(create_sql)
             print(f"Created table with {len(full_schema)} columns")
 
@@ -69,6 +71,8 @@ class DuckDBLoader:
             print(f"Adding {len(new_columns)} new columns to {table_name}")
             alter_statements = self.schema_manager.generate_alter_table_sql(table_name, new_columns)
 
+            if not self.connection:
+                raise RuntimeError("Connection not established. Use within context manager.")
             for statement in alter_statements:
                 self.connection.execute(statement)
                 print(f"  Added column: {statement.split('ADD COLUMN')[1].strip()}")
@@ -145,7 +149,9 @@ class DuckDBLoader:
                 )
             """
 
-            result = self.connection.execute(insert_sql)
+            if not self.connection:
+                raise RuntimeError("Connection not established. Use within context manager.")
+            _ = self.connection.execute(insert_sql)
 
             # Get row count - DuckDB doesn't have changes(), so we'll count the table
             # This is not perfect but works for our use case
@@ -173,6 +179,7 @@ class DuckDBLoader:
 
         print(f"Loading manifest: {billing_period} ({manifest_id})")
 
+        csv_files = []  # Initialize for error handling
         try:
             # Update state to loading
             self.state_db.update_manifest_state(manifest_id, "loading")
@@ -229,7 +236,7 @@ class DuckDBLoader:
                 'manifest_id': manifest_id,
                 'billing_period': billing_period,
                 'files_loaded': 0,
-                'total_files': len(csv_files) if 'csv_files' in locals() else 0,
+                'total_files': len(csv_files),
                 'rows_loaded': 0,
                 'status': 'failed',
                 'error': error_msg
@@ -337,7 +344,10 @@ class DuckDBLoader:
                 return None
 
             # Get row count
-            row_count = self.connection.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+            if not self.connection:
+                raise RuntimeError("Connection not established. Use within context manager.")
+            result = self.connection.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
+            row_count = result[0] if result else 0
 
             # Get date range - use normalized column names
             date_range = self.connection.execute(f"""
