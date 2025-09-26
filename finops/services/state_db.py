@@ -39,10 +39,28 @@ class StateDB:
                 )
             """)
 
+            # Create exports table for tracking export operations
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS exports (
+                    export_id TEXT PRIMARY KEY,
+                    vendor TEXT NOT NULL,
+                    billing_period TEXT NOT NULL,
+                    export_type TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    error_message TEXT
+                )
+            """)
+
             # Create index for efficient querying
             conn.execute("CREATE INDEX IF NOT EXISTS idx_manifests_state ON manifests(state)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_manifests_billing_period ON manifests(billing_period)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_manifests_vendor ON manifests(vendor)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_exports_state ON exports(state)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_exports_billing_period ON exports(billing_period)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_exports_vendor ON exports(vendor)")
 
     def save_manifest(self, manifest: CURManifest, state: str = "discovered") -> None:
         """Save or update a manifest record."""
@@ -190,3 +208,66 @@ class StateDB:
             """, (vendor, billing_period))
 
             return [dict(row) for row in cursor.fetchall()]
+
+    def save_export(self, export_id: str, vendor: str, billing_period: str,
+                   export_type: str, file_path: str, state: str = "pending") -> None:
+        """Save a new export record."""
+        now = datetime.utcnow().isoformat()
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO exports (
+                    export_id, vendor, billing_period, export_type,
+                    file_path, state, created_at, updated_at, error_message
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (export_id, vendor, billing_period, export_type,
+                  file_path, state, now, now, None))
+
+    def update_export_state(self, export_id: str, new_state: str, error_message: Optional[str] = None) -> None:
+        """Update the state of an export."""
+        now = datetime.utcnow().isoformat()
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                UPDATE exports
+                SET state = ?, updated_at = ?, error_message = ?
+                WHERE export_id = ?
+            """, (new_state, now, error_message, export_id))
+
+    def get_export_status(self, vendor: str, billing_period: str, export_type: str) -> Optional[Dict]:
+        """Get export status for a specific billing period and type."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT * FROM exports
+                WHERE vendor = ? AND billing_period = ? AND export_type = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, (vendor, billing_period, export_type))
+
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def get_exports_by_state(self, state: str, vendor: str = "aws") -> List[Dict]:
+        """Get all exports in a specific state."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT * FROM exports
+                WHERE state = ? AND vendor = ?
+                ORDER BY billing_period DESC
+            """, (state, vendor))
+
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_loaded_billing_periods(self, vendor: str = "aws") -> List[str]:
+        """Get billing periods that have been successfully loaded into DuckDB."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("""
+                SELECT DISTINCT billing_period
+                FROM manifests
+                WHERE vendor = ? AND state = 'loaded'
+                ORDER BY billing_period DESC
+            """, (vendor,))
+
+            return [row[0] for row in cursor.fetchall()]
