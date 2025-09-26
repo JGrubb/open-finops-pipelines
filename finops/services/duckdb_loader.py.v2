@@ -1,0 +1,483 @@
+import re
+import json
+import gzip
+import duckdb
+from pathlib import Path
+from typing import List, Dict, Optional
+
+from finops.services.state_db import StateDB
+
+
+class DuckDBLoader:
+    """DuckDB loader for AWS Cost and Usage Report (CUR) data with schema evolution."""
+
+    # SQL reserved words that need _col suffix
+    RESERVED_WORDS = {
+        'group', 'order', 'select', 'from', 'where', 'join', 'inner', 'outer',
+        'left', 'right', 'on', 'as', 'and', 'or', 'not', 'in', 'exists',
+        'between', 'like', 'is', 'null', 'true', 'false', 'case', 'when',
+        'then', 'else', 'end', 'union', 'intersect', 'except', 'all',
+        'distinct', 'limit', 'offset', 'having', 'by', 'asc', 'desc',
+        'create', 'table', 'insert', 'update', 'delete', 'alter', 'drop',
+        'user', 'role'
+    }
+
+    # AWS CUR type to DuckDB type mapping
+    TYPE_MAPPING = {
+        "String": "VARCHAR",
+        "OptionalString": "VARCHAR",
+        "BigDecimal": "DECIMAL(18,2)",
+        "OptionalBigDecimal": "DECIMAL(18,2)",
+        "DateTime": "TIMESTAMP",
+        "Interval": "VARCHAR"
+    }
+
+    def __init__(self, duckdb_path: str, state_db: StateDB, table_name: str = "cur_data"):
+        self.duckdb_path = duckdb_path
+        self.state_db = state_db
+        self.table_name = table_name
+        self.conn: Optional[duckdb.DuckDBPyConnection] = None
+
+    def __enter__(self):
+        """Context manager entry."""
+        self.conn = duckdb.connect(self.duckdb_path)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit."""
+        if self.conn:
+            self.conn.close()
+
+    def normalize_column_name(self, column_name: str) -> str:
+        """
+        Normalize column name according to the specification:
+        1. Convert camelCase to snake_case
+        2. Convert to lowercase
+        3. Replace non-alphanumeric with underscores
+        4. Collapse consecutive underscores
+        5. Strip leading/trailing underscores
+        6. Handle edge cases and reserved words
+        """
+        if not column_name:
+            return "unknown_column"
+
+        # Step 1: Convert camelCase to snake_case
+        name = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', column_name)
+
+        # Step 2: Convert to lowercase
+        name = name.lower()
+
+        # Step 3: Replace non-alphanumeric with underscores
+        name = re.sub(r'[^a-z0-9]', '_', name)
+
+        # Step 4: Collapse consecutive underscores
+        name = re.sub(r'_+', '_', name)
+
+        # Step 5: Strip leading/trailing underscores
+        name = name.strip('_')
+
+        # Step 6: Handle edge cases
+        if not name:
+            return "unknown_column"
+
+        # Starts with digit
+        if name[0].isdigit():
+            name = f"col_{name}"
+
+        # SQL reserved words
+        if name in self.RESERVED_WORDS:
+            name = f"{name}_col"
+
+        return name
+
+    def create_column_mapping_with_duplicates(self, original_columns: List[str]) -> Dict[str, str]:
+        """
+        Create mapping from original column names to normalized names, handling duplicates.
+        Returns dict: {original_name: normalized_name}
+        """
+        normalized_columns = {}
+        seen_normalized_names = {}
+
+        for original_col in original_columns:
+            base_normalized = self.normalize_column_name(original_col)
+
+            if base_normalized in seen_normalized_names:
+                seen_normalized_names[base_normalized] += 1
+                final_name = f"{base_normalized}_{seen_normalized_names[base_normalized]}"
+            else:
+                seen_normalized_names[base_normalized] = 0
+                final_name = base_normalized
+
+            normalized_columns[original_col] = final_name
+
+        return normalized_columns
+
+    def map_aws_type_to_duckdb(self, aws_type: str, category: str) -> str:
+        """Map AWS CUR type to DuckDB type, with ResourceTags override."""
+        # Force resourceTags to VARCHAR regardless of declared type
+        if category == "resourceTags":
+            return "VARCHAR"
+
+        return self.TYPE_MAPPING.get(aws_type, "VARCHAR")
+
+    def get_unified_schema(self, manifests: List[Dict]) -> Dict[str, str]:
+        """
+        Create unified schema from all manifests with consistent duplicate handling.
+        Returns dict: {normalized_column_name: duckdb_type}
+        """
+        all_original_columns = []
+        column_type_map = {}  # {original_name: (category, aws_type)}
+
+        # Collect all unique original column names from all manifests
+        seen_originals = set()
+
+        for manifest in manifests:
+            columns_schema = json.loads(manifest['columns_schema'])
+
+            for col_def in columns_schema:
+                category = col_def.get('category', '')
+                name = col_def.get('name', '')
+                aws_type = col_def.get('type', 'String')
+
+                original_name = f"{category}/{name}"
+
+                if original_name not in seen_originals:
+                    all_original_columns.append(original_name)
+                    column_type_map[original_name] = (category, aws_type)
+                    seen_originals.add(original_name)
+
+        # Create consistent column mapping with duplicate handling
+        column_mapping = self.create_column_mapping_with_duplicates(all_original_columns)
+
+        # Build final schema with types
+        unified_schema = {}
+        for original_name, normalized_name in column_mapping.items():
+            category, aws_type = column_type_map[original_name]
+            duckdb_type = self.map_aws_type_to_duckdb(aws_type, category)
+            unified_schema[normalized_name] = duckdb_type
+
+        return unified_schema
+
+    def table_exists(self) -> bool:
+        """Check if the CUR data table exists."""
+        if not self.conn:
+            raise RuntimeError("Database connection not initialized. Use within context manager.")
+
+        result = self.conn.execute("""
+            SELECT COUNT(*)
+            FROM information_schema.tables
+            WHERE table_name = ?
+        """, [self.table_name]).fetchone()
+
+        return result[0] > 0
+
+    def get_existing_columns(self) -> Dict[str, str]:
+        """Get existing table columns and their types."""
+        if not self.table_exists():
+            return {}
+
+        if not self.conn:
+            raise RuntimeError("Database connection not initialized. Use within context manager.")
+
+        result = self.conn.execute("""
+            SELECT column_name, data_type
+            FROM information_schema.columns
+            WHERE table_name = ?
+            ORDER BY ordinal_position
+        """, [self.table_name]).fetchall()
+
+        return {row[0]: row[1] for row in result}
+
+    def create_table(self, schema: Dict[str, str]) -> None:
+        """Create table with given schema."""
+        if not schema:
+            raise ValueError("Cannot create table with empty schema")
+
+        if not self.conn:
+            raise RuntimeError("Database connection not initialized. Use within context manager.")
+
+        columns_sql = ", ".join([f"{col_name} {col_type}" for col_name, col_type in schema.items()])
+        create_sql = f"CREATE TABLE {self.table_name} ({columns_sql})"
+
+        print(f"Creating table with {len(schema)} columns...")
+        self.conn.execute(create_sql)
+
+    def add_new_columns(self, new_columns: Dict[str, str]) -> None:
+        """Add new columns to existing table."""
+        if not new_columns:
+            return
+
+        if not self.conn:
+            raise RuntimeError("Database connection not initialized. Use within context manager.")
+
+        print(f"Adding {len(new_columns)} new columns to table...")
+
+        for col_name, col_type in new_columns.items():
+            alter_sql = f"ALTER TABLE {self.table_name} ADD COLUMN {col_name} {col_type}"
+            self.conn.execute(alter_sql)
+
+    def ensure_table_schema(self, manifests: List[Dict]) -> Dict[str, str]:
+        """
+        Ensure table exists with correct schema, adding new columns as needed.
+        Returns the final unified schema.
+        """
+        unified_schema = self.get_unified_schema(manifests)
+
+        if not self.table_exists():
+            self.create_table(unified_schema)
+        else:
+            existing_columns = self.get_existing_columns()
+            new_columns = {
+                col_name: col_type
+                for col_name, col_type in unified_schema.items()
+                if col_name not in existing_columns
+            }
+            self.add_new_columns(new_columns)
+
+        return unified_schema
+
+    def read_csv_header(self, csv_path: str) -> List[str]:
+        """Read CSV header, handling gzip compression."""
+        path = Path(csv_path)
+
+        if path.suffix == '.gz':
+            with gzip.open(csv_path, 'rt') as f:
+                header_line = f.readline().strip()
+        else:
+            with open(csv_path, 'r') as f:
+                header_line = f.readline().strip()
+
+        return header_line.split(',')
+
+    def load_csv_file(self, csv_path: str, manifest_columns: List[Dict], unified_schema: Dict[str, str]) -> int:
+        """
+        Load a single CSV file into the table.
+        Returns number of rows inserted.
+        """
+        print(f"Loading CSV: {Path(csv_path).name}")
+
+        # Read CSV header
+        csv_header = self.read_csv_header(csv_path)
+
+        # Create column mapping for this CSV (consistent with unified schema)
+        csv_column_mapping = self.create_column_mapping_with_duplicates(csv_header)
+
+        # Build column type specifications for read_csv
+        columns_spec = {}
+        column_category_map = {}
+
+        # Create mapping from original column format to manifest column info
+        for col_def in manifest_columns:
+            category = col_def.get('category', '')
+            name = col_def.get('name', '')
+            aws_type = col_def.get('type', 'String')
+            original_format = f"{category}/{name}"
+            column_category_map[original_format] = (category, aws_type)
+
+        # Build DuckDB column specifications
+        for csv_col, normalized_name in csv_column_mapping.items():
+            if csv_col in column_category_map:
+                category, aws_type = column_category_map[csv_col]
+                duckdb_type = self.map_aws_type_to_duckdb(aws_type, category)
+            else:
+                duckdb_type = "VARCHAR"  # Fallback
+
+            columns_spec[normalized_name] = duckdb_type
+
+        # Prepare column list for INSERT
+        normalized_column_names = list(csv_column_mapping.values())
+        columns_list = ", ".join(normalized_column_names)
+
+        # Build read_csv column specification
+        columns_dict_str = ", ".join([f"'{col}': '{dtype}'" for col, dtype in columns_spec.items()])
+
+        # Determine compression
+        compression = 'gzip' if csv_path.endswith('.gz') else 'none'
+
+        # Execute INSERT with read_csv
+        if not self.conn:
+            raise RuntimeError("Database connection not initialized. Use within context manager.")
+
+        insert_sql = f"""
+            INSERT INTO {self.table_name} ({columns_list})
+            SELECT * FROM read_csv(
+                '{csv_path}',
+                columns = {{{columns_dict_str}}},
+                header = true,
+                delim = ',',
+                compression = '{compression}'
+            )
+        """
+
+        self.conn.execute(insert_sql)
+        rows_inserted = self.conn.execute(f"SELECT changes()").fetchone()[0]
+
+        print(f"  Inserted {rows_inserted:,} rows")
+        return rows_inserted
+
+    def load_billing_data(self, staging_dir: str, start_date: Optional[str] = None,
+                         end_date: Optional[str] = None) -> Dict:
+        """
+        Load billing data from staged CSV files into DuckDB.
+        Returns statistics dict.
+        """
+        staging_path = Path(staging_dir)
+        if not staging_path.exists():
+            raise ValueError(f"Staging directory does not exist: {staging_dir}")
+
+        print(f"Loading billing data from: {staging_dir}")
+
+        # Get staged manifests in date range
+        staged_manifests = self.state_db.get_manifests_by_state('staged')
+
+        if start_date or end_date:
+            filtered_manifests = []
+            for manifest in staged_manifests:
+                period = manifest['billing_period']
+                if start_date and period < start_date:
+                    continue
+                if end_date and period > end_date:
+                    continue
+                filtered_manifests.append(manifest)
+            staged_manifests = filtered_manifests
+
+        if not staged_manifests:
+            print("No staged manifests found for loading.")
+            return {
+                'loaded_manifests': 0,
+                'loaded_files': 0,
+                'total_rows': 0,
+                'errors': 0
+            }
+
+        # Sort manifests by billing period DESC (newest first for consistency)
+        staged_manifests.sort(key=lambda x: x['billing_period'], reverse=True)
+
+        print(f"Found {len(staged_manifests)} staged manifests to load")
+
+        # Ensure table schema is current for all manifests
+        unified_schema = self.ensure_table_schema(staged_manifests)
+        print(f"Table schema: {len(unified_schema)} columns")
+
+        # Process each manifest
+        total_stats = {
+            'loaded_manifests': 0,
+            'loaded_files': 0,
+            'total_rows': 0,
+            'errors': 0
+        }
+
+        for manifest in staged_manifests:
+            manifest_id = manifest['manifest_id']
+            billing_period = manifest['billing_period']
+            csv_files = json.loads(manifest['csv_files'])
+            columns_schema = json.loads(manifest['columns_schema'])
+
+            print(f"\nProcessing manifest: {billing_period} ({manifest_id})")
+            print(f"  Files: {len(csv_files)}")
+
+            try:
+                # Update state to loading
+                self.state_db.update_manifest_state(manifest_id, 'loading')
+
+                manifest_rows = 0
+                manifest_files = 0
+
+                # Load each CSV file
+                for csv_s3_key in csv_files:
+                    # Find local staging file
+                    csv_filename = Path(csv_s3_key).name
+                    local_csv_path = staging_path / billing_period / csv_filename
+
+                    if not local_csv_path.exists():
+                        print(f"  Warning: Staged file not found: {local_csv_path}")
+                        continue
+
+                    # Load the CSV file
+                    rows_inserted = self.load_csv_file(
+                        str(local_csv_path),
+                        columns_schema,
+                        unified_schema
+                    )
+
+                    manifest_rows += rows_inserted
+                    manifest_files += 1
+
+                # Update state to loaded
+                self.state_db.update_manifest_state(manifest_id, 'loaded')
+
+                total_stats['loaded_manifests'] += 1
+                total_stats['loaded_files'] += manifest_files
+                total_stats['total_rows'] += manifest_rows
+
+                print(f"  Completed: {manifest_files} files, {manifest_rows:,} rows")
+
+            except Exception as e:
+                error_msg = str(e)
+                print(f"  Error loading manifest {manifest_id}: {error_msg}")
+
+                # Update state to failed
+                self.state_db.update_manifest_state(manifest_id, 'failed', error_msg)
+                total_stats['errors'] += 1
+
+        return total_stats
+
+    def get_table_info(self) -> Optional[Dict]:
+        """Get information about the loaded table."""
+        if not self.table_exists():
+            return None
+
+        if not self.conn:
+            raise RuntimeError("Database connection not initialized. Use within context manager.")
+
+        # Get basic table info
+        column_count_result = self.conn.execute(f"""
+            SELECT COUNT(*)
+            FROM information_schema.columns
+            WHERE table_name = ?
+        """, [self.table_name]).fetchone()
+
+        row_count_result = self.conn.execute(f"SELECT COUNT(*) FROM {self.table_name}").fetchone()
+
+        column_count = column_count_result[0] if column_count_result else 0
+        row_count = row_count_result[0] if row_count_result else 0
+
+        # Get date range if bill_billing_period_start exists
+        date_range: Dict[str, Optional[str]] = {'min_date': None, 'max_date': None}
+
+        # Check if billing period start column exists (various possible normalized names)
+        possible_date_columns = [
+            'bill_billing_period_start',
+            'billing_billing_period_start',
+            'bill_billing_period_start_col'
+        ]
+
+        existing_columns = set(col.lower() for col in self.get_existing_columns().keys())
+        date_column = None
+
+        for col in possible_date_columns:
+            if col in existing_columns:
+                date_column = col
+                break
+
+        if date_column and row_count > 0:
+            try:
+                date_result = self.conn.execute(f"""
+                    SELECT MIN({date_column}), MAX({date_column})
+                    FROM {self.table_name}
+                    WHERE {date_column} IS NOT NULL
+                """).fetchone()
+
+                if date_result and date_result[0]:
+                    date_range['min_date'] = str(date_result[0])[:10]  # YYYY-MM-DD format
+                    date_range['max_date'] = str(date_result[1])[:10]
+            except:
+                # Ignore date range errors
+                pass
+
+        return {
+            'table_name': self.table_name,
+            'column_count': column_count,
+            'row_count': row_count,
+            'date_range': date_range
+        }
