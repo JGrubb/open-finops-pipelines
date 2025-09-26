@@ -125,11 +125,7 @@ class DuckDBLoader:
                     category = col_def['category']
                     aws_type = col_def['type']
 
-                    # Force resourceTags to VARCHAR
-                    if category == 'resourceTags':
-                        duckdb_type = "VARCHAR"
-                    else:
-                        duckdb_type = self.schema_manager.TYPE_MAPPING.get(aws_type, "VARCHAR")
+                    duckdb_type = self.schema_manager.get_duckdb_type(category, aws_type)
                 else:
                     duckdb_type = "VARCHAR"  # fallback
 
@@ -167,7 +163,7 @@ class DuckDBLoader:
             print(f"    Error loading {csv_path.name}: {str(e)}")
             raise
 
-    def load_manifest(self, manifest: Dict, staging_dir: str, table_name: str = "aws_cur") -> Dict:
+    def load_manifest(self, manifest: Dict, staging_dir: str, table_name: str = "finops") -> Dict:
         """
         Load all CSV files for a specific manifest.
         Returns loading statistics.
@@ -240,7 +236,7 @@ class DuckDBLoader:
             }
 
     def load_billing_data(self, staging_dir: str, start_date: Optional[str] = None,
-                         end_date: Optional[str] = None, table_name: str = "aws_cur") -> Dict:
+                         end_date: Optional[str] = None, table_name: str = "finops") -> Dict:
         """
         Load billing data from staged CSV files into DuckDB.
 
@@ -332,7 +328,7 @@ class DuckDBLoader:
             'results': manifest_results
         }
 
-    def get_table_info(self, table_name: str = "aws_cur") -> Optional[Dict]:
+    def get_table_info(self, table_name: str = "finops") -> Optional[Dict]:
         """Get information about the loaded table."""
         try:
             # Check if table exists

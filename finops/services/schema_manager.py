@@ -1,6 +1,5 @@
 import json
 import re
-from pathlib import Path
 from typing import Dict, List, Set, Tuple, Optional
 from dataclasses import dataclass
 
@@ -95,6 +94,60 @@ class SchemaManager:
         }
         return word.lower() in reserved_words
 
+    def _parse_column(self, col: Dict) -> Tuple[str, str, str, str]:
+        """Parse a column dict into its components."""
+        category = col['category']
+        name = col['name']
+        original_name = f"{category}/{name}"
+        aws_type = col['type']
+        return category, name, original_name, aws_type
+
+    def _get_duckdb_type(self, category: str, aws_type: str) -> str:
+        """Get DuckDB type for a column, handling special cases."""
+        if category == 'resourceTags':
+            return "VARCHAR"
+        return self.TYPE_MAPPING.get(aws_type, "VARCHAR")
+
+    def get_duckdb_type(self, category: str, aws_type: str) -> str:
+        """Public method to get DuckDB type for a column."""
+        return self._get_duckdb_type(category, aws_type)
+
+    def _resolve_duplicate_name(self, base_name: str, seen_names: Dict[str, int]) -> str:
+        """Resolve duplicate normalized names by adding suffix."""
+        if base_name in seen_names:
+            seen_names[base_name] += 1
+            return f"{base_name}_{seen_names[base_name]}"
+        else:
+            seen_names[base_name] = 0
+            return base_name
+
+    def _process_manifest_columns(self, manifest_columns: List[Dict],
+                                 existing_columns: Optional[Set[str]] = None) -> List[ColumnDefinition]:
+        """Core method to process manifest columns into ColumnDefinitions."""
+        columns = []
+        seen_normalized_names = {}
+
+        for col in manifest_columns:
+            category, _, original_name, aws_type = self._parse_column(col)
+            base_normalized_name = self.normalize_column_name(original_name)
+            normalized_name = self._resolve_duplicate_name(base_normalized_name, seen_normalized_names)
+
+            # Filter by existing columns if specified
+            if existing_columns is not None and normalized_name in existing_columns:
+                continue
+
+            duckdb_type = self._get_duckdb_type(category, aws_type)
+
+            columns.append(ColumnDefinition(
+                original_name=original_name,
+                normalized_name=normalized_name,
+                category=category,
+                aws_type=aws_type,
+                duckdb_type=duckdb_type
+            ))
+
+        return columns
+
     def get_unified_schema(self, billing_periods: Optional[List[str]] = None) -> List[ColumnDefinition]:
         """
         Build unified schema from all manifests or specific billing periods.
@@ -168,47 +221,13 @@ class SchemaManager:
 
         return sql
 
-    def get_new_columns(self, table_name: str, existing_columns: Set[str],
+    def get_new_columns(self, _: str, existing_columns: Set[str],
                        manifest_columns: List[Dict]) -> List[ColumnDefinition]:
         """
         Identify new columns from a manifest that don't exist in the current table schema.
         Returns list of new column definitions.
         """
-        new_columns = []
-        seen_normalized_names = {}
-
-        for col in manifest_columns:
-            # The actual CSV column name is category/name
-            category = col['category']
-            name = col['name']
-            original_name = f"{category}/{name}"
-            base_normalized_name = self.normalize_column_name(original_name)
-            aws_type = col['type']
-
-            # Handle duplicate normalized names by adding suffix
-            if base_normalized_name in seen_normalized_names:
-                seen_normalized_names[base_normalized_name] += 1
-                normalized_name = f"{base_normalized_name}_{seen_normalized_names[base_normalized_name]}"
-            else:
-                seen_normalized_names[base_normalized_name] = 0
-                normalized_name = base_normalized_name
-
-            if normalized_name not in existing_columns:
-                # Force resourceTags to VARCHAR
-                if category == 'resourceTags':
-                    duckdb_type = "VARCHAR"
-                else:
-                    duckdb_type = self.TYPE_MAPPING.get(aws_type, "VARCHAR")
-
-                new_columns.append(ColumnDefinition(
-                    original_name=original_name,
-                    normalized_name=normalized_name,
-                    category=category,
-                    aws_type=aws_type,
-                    duckdb_type=duckdb_type
-                ))
-
-        return new_columns
+        return self._process_manifest_columns(manifest_columns, existing_columns)
 
     def generate_alter_table_sql(self, table_name: str, new_columns: List[ColumnDefinition]) -> List[str]:
         """Generate ALTER TABLE statements to add new columns."""
@@ -225,29 +244,9 @@ class SchemaManager:
         """
         Create mapping from original column names to normalized column names.
         Used for CSV column header transformation during loading.
-        This uses the same duplicate handling logic as get_unified_schema.
         """
-        mapping = {}
-        seen_normalized_names = {}
-
-        for col in manifest_columns:
-            # The actual CSV column name is category/name
-            category = col['category']
-            name = col['name']
-            original_name = f"{category}/{name}"
-            base_normalized_name = self.normalize_column_name(original_name)
-
-            # Handle duplicate normalized names by adding suffix
-            if base_normalized_name in seen_normalized_names:
-                seen_normalized_names[base_normalized_name] += 1
-                normalized_name = f"{base_normalized_name}_{seen_normalized_names[base_normalized_name]}"
-            else:
-                seen_normalized_names[base_normalized_name] = 0
-                normalized_name = base_normalized_name
-
-            mapping[original_name] = normalized_name
-
-        return mapping
+        columns = self._process_manifest_columns(manifest_columns)
+        return {col.original_name: col.normalized_name for col in columns}
 
     def get_schema_summary(self, schema: List[ColumnDefinition]) -> Dict:
         """Get summary statistics about a schema."""

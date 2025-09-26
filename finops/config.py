@@ -22,7 +22,7 @@ class FinopsConfig:
     aws: AWSConfig
     staging_dir: str = "./staging"
     state_db: str = "./finops_state.db"
-    duckdb_path: str = "./data/aws_cur.duckdb"
+    duckdb_path: str = "./data/finops.duckdb"
 
     @classmethod
     def from_file(cls, config_path: Path) -> "FinopsConfig":
@@ -55,7 +55,7 @@ class FinopsConfig:
         # Extract global config
         staging_dir = config_data.get("staging_dir", "./staging")
         state_db = config_data.get("state_db", "./finops_state.db")
-        duckdb_path = config_data.get("duckdb_path", "./data/aws_cur.duckdb")
+        duckdb_path = config_data.get("duckdb_path", "./data/finops.duckdb")
 
         return cls(
             aws=aws_config,
