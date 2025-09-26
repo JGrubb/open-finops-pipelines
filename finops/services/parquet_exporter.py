@@ -10,10 +10,11 @@ from finops.services.state_db import StateDB
 class ParquetExporter:
     """Service for exporting DuckDB data to Parquet files."""
 
-    def __init__(self, duckdb_path: str, state_db: StateDB, parquet_dir: str):
+    def __init__(self, duckdb_path: str, state_db: StateDB, parquet_dir: str, table_name: str = "aws_billing_data"):
         self.duckdb_path = Path(duckdb_path)
         self.state_db = state_db
         self.parquet_dir = Path(parquet_dir)
+        self.table_name = table_name
         self.parquet_dir.mkdir(parents=True, exist_ok=True)
 
     def __enter__(self):
@@ -99,12 +100,12 @@ class ParquetExporter:
     def _has_data_for_period(self, billing_period: str, vendor: str) -> bool:
         """Check if DuckDB has data for the specified billing period."""
         try:
-            # Check if finops table exists and has data for this billing period
+            # Check if table exists and has data for this billing period
             # billing_period format is "YYYY-MM", convert to date for comparison
             year, month = billing_period.split('-')
-            result = self.conn.execute("""
+            result = self.conn.execute(f"""
                 SELECT COUNT(*)
-                FROM finops
+                FROM {self.table_name}
                 WHERE EXTRACT(YEAR FROM bill_billing_period_start_date) = ?
                   AND EXTRACT(MONTH FROM bill_billing_period_start_date) = ?
             """, (int(year), int(month))).fetchone()
@@ -129,7 +130,7 @@ class ParquetExporter:
         query = f"""
             COPY (
                 SELECT *
-                FROM finops
+                FROM {self.table_name}
                 WHERE EXTRACT(YEAR FROM bill_billing_period_start_date) = {year}
                   AND EXTRACT(MONTH FROM bill_billing_period_start_date) = {month}
                 ORDER BY line_item_usage_start_date, line_item_usage_account_id, line_item_product_code
@@ -142,13 +143,13 @@ class ParquetExporter:
         """Get list of billing periods that have loaded data available for export."""
         try:
             # Query actual DuckDB data to get available billing periods
-            result = self.conn.execute("""
+            result = self.conn.execute(f"""
                 SELECT DISTINCT
                     PRINTF('%04d-%02d',
                            EXTRACT(YEAR FROM bill_billing_period_start_date),
                            EXTRACT(MONTH FROM bill_billing_period_start_date)
                     ) as billing_period
-                FROM finops
+                FROM {self.table_name}
                 ORDER BY billing_period DESC
             """).fetchall()
 
@@ -167,9 +168,9 @@ class ParquetExporter:
         return exports_by_state
 
     def validate_table_exists(self) -> bool:
-        """Validate that the finops table exists and has data."""
+        """Validate that the table exists and has data."""
         try:
-            result = self.conn.execute("SELECT COUNT(*) FROM finops").fetchone()
+            result = self.conn.execute(f"SELECT COUNT(*) FROM {self.table_name}").fetchone()
             return result[0] > 0 if result else False
         except Exception:
             return False

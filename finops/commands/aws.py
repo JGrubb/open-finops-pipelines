@@ -125,6 +125,21 @@ def setup_aws_parser(subparsers):
         "load-billing-remote",
         help="Load billing data to remote warehouse"
     )
+    load_remote_parser.add_argument(
+        "--start-date",
+        help="Start date for loading (YYYY-MM format)",
+        metavar="YYYY-MM"
+    )
+    load_remote_parser.add_argument(
+        "--end-date",
+        help="End date for loading (YYYY-MM format)",
+        metavar="YYYY-MM"
+    )
+    load_remote_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing data in remote warehouse"
+    )
     load_remote_parser.set_defaults(func=load_billing_remote)
 
 
@@ -337,7 +352,8 @@ def load_billing_local(config_path, args):
             stats = loader.load_billing_data(
                 staging_dir=config.staging_dir,
                 start_date=getattr(args, 'start_date', None),
-                end_date=getattr(args, 'end_date', None)
+                end_date=getattr(args, 'end_date', None),
+                table_name="aws_billing_data"
             )
 
             # Display final results
@@ -347,7 +363,7 @@ def load_billing_local(config_path, args):
                 print(f"Database location: {config.duckdb_path}")
 
                 # Show table info
-                table_info = loader.get_table_info()
+                table_info = loader.get_table_info("aws_billing_data")
                 if table_info:
                     print(f"\nTable Information:")
                     print(f"  Table: {table_info['table_name']}")
@@ -398,10 +414,10 @@ def export_parquet(config_path, args):
             return
 
         # Export using ParquetExporter service
-        with ParquetExporter(config.duckdb_path, state_db, parquet_dir) as exporter:
+        with ParquetExporter(config.duckdb_path, state_db, parquet_dir, "aws_billing_data") as exporter:
             # Validate DuckDB table exists
             if not exporter.validate_table_exists():
-                print("❌ Error: finops table not found or empty in DuckDB")
+                print("❌ Error: aws_billing_data table not found or empty in DuckDB")
                 print("   Run 'finops aws load-billing-local' to load data first")
                 return
 
@@ -465,7 +481,98 @@ def export_parquet(config_path, args):
         traceback.print_exc()
 
 
-def load_billing_remote(config, args):
+def load_billing_remote(config_path, args):
     """Load billing data to remote warehouse."""
+    from finops.config import FinopsConfig
+    from finops.services.bigquery_loader import BigQueryLoader
+    from finops.services.state_db import StateDB
+    from pathlib import Path
+
     print("☁️  Loading billing data to remote warehouse...")
-    print("[STUB] Implementation pending")
+
+    try:
+        # Load configuration
+        config = FinopsConfig.from_file(config_path)
+
+        # Validate BigQuery backend is configured
+        if config.database.backend != "bigquery":
+            raise ValueError(f"Remote loading requires BigQuery backend, but backend is set to '{config.database.backend}'")
+
+        if not config.database.bigquery:
+            raise ValueError("BigQuery configuration is missing")
+
+        print(f"Project: {config.database.bigquery.project_id}")
+        print(f"Dataset: {config.database.bigquery.dataset_id}")
+        print(f"Table: {config.database.bigquery.table_id}")
+        print()
+
+        # Initialize state database and BigQuery loader
+        state_db = StateDB(Path(config.state_db))
+
+        loader = BigQueryLoader(state_db, config.database.bigquery, config.parquet_dir)
+
+        # Validate connections
+        if not loader.validate_bigquery_connection():
+            raise ValueError("Cannot connect to BigQuery. Check credentials and dataset access.")
+
+        # Get available billing periods from exported Parquet files
+        available_periods = loader.get_available_billing_periods()
+        if not available_periods:
+            raise ValueError("No exported Parquet files found. Run 'finops aws export-parquet' first.")
+
+        print(f"Found {len(available_periods)} exported Parquet files:")
+        for period in available_periods:
+            print(f"  - {period}")
+        print()
+
+        # Handle date range filtering
+        periods_to_load = available_periods
+        if hasattr(args, 'start_date') and args.start_date:
+            periods_to_load = [p for p in periods_to_load if p >= args.start_date]
+        if hasattr(args, 'end_date') and args.end_date:
+            periods_to_load = [p for p in periods_to_load if p <= args.end_date]
+
+        if not periods_to_load:
+            print("No billing periods match the specified date range")
+            return
+
+        # Load billing data to BigQuery
+        overwrite = getattr(args, 'overwrite', False)
+        print(f"Loading {len(periods_to_load)} billing periods to BigQuery...")
+        if overwrite:
+            print("⚠️  Overwrite mode enabled")
+        print()
+
+        results = loader.load_billing_periods(
+            periods_to_load,
+            vendor="aws",
+            overwrite=overwrite
+        )
+
+        # Display summary
+        summary = loader.get_load_summary()
+        loaded_count = len([r for r in results.values() if r == "loaded"])
+        skipped_count = len([r for r in results.values() if r == "skipped"])
+        failed_count = len([r for r in results.values() if r == "failed"])
+
+        print()
+        print("📊 Load Summary:")
+        print(f"  Loaded: {loaded_count}")
+        print(f"  Skipped: {skipped_count}")
+        print(f"  Failed: {failed_count}")
+        print()
+        print("📈 Total BigQuery Operations:")
+        for state, count in summary.items():
+            print(f"  {state.title()}: {count}")
+
+        if failed_count > 0:
+            print()
+            print("❌ Some loads failed. Check logs above for details.")
+            exit(1)
+        else:
+            print()
+            print("✅ All billing periods loaded successfully!")
+
+    except Exception as e:
+        print(f"❌ Error loading billing data to BigQuery: {str(e)}")
+        exit(1)

@@ -17,12 +17,35 @@ class AWSConfig:
 
 
 @dataclass
+class BigQueryConfig:
+    """BigQuery configuration settings."""
+    project_id: str
+    dataset_id: str
+    table_id: str
+    credentials_path: str
+
+
+@dataclass
+class DatabaseConfig:
+    """Database backend configuration."""
+    backend: str = "duckdb"  # Options: "duckdb", "bigquery"
+    duckdb: Optional['DuckDBConfig'] = None
+    bigquery: Optional[BigQueryConfig] = None
+
+
+@dataclass
+class DuckDBConfig:
+    """DuckDB configuration settings."""
+    database_path: str = "./data/finops.duckdb"
+
+
+@dataclass
 class FinopsConfig:
     """Main configuration for finops CLI."""
     aws: AWSConfig
+    database: DatabaseConfig
     staging_dir: str = "./staging"
     state_db: str = "./finops_state.db"
-    duckdb_path: str = "./data/finops.duckdb"
     parquet_dir: str = "./data/parquet"
 
     @classmethod
@@ -53,17 +76,51 @@ class FinopsConfig:
             region=aws_data.get("region", "us-east-1")
         )
 
+        # Extract database config
+        db_data = config_data.get("database", {})
+        backend = db_data.get("backend", "duckdb")
+
+        duckdb_config = None
+        bigquery_config = None
+
+        if backend == "duckdb":
+            duckdb_data = db_data.get("duckdb", {})
+            duckdb_config = DuckDBConfig(
+                database_path=duckdb_data.get("database_path", "./data/finops.duckdb")
+            )
+        elif backend == "bigquery":
+            bq_data = db_data.get("bigquery", {})
+            if not bq_data:
+                raise ValueError("Missing [database.bigquery] section for BigQuery backend")
+
+            required_bq_fields = ["project_id", "dataset_id", "table_id", "credentials_path"]
+            for field in required_bq_fields:
+                if field not in bq_data:
+                    raise ValueError(f"Missing required BigQuery configuration: {field}")
+
+            bigquery_config = BigQueryConfig(
+                project_id=bq_data["project_id"],
+                dataset_id=bq_data["dataset_id"],
+                table_id=bq_data["table_id"],
+                credentials_path=bq_data["credentials_path"]
+            )
+
+        database_config = DatabaseConfig(
+            backend=backend,
+            duckdb=duckdb_config,
+            bigquery=bigquery_config
+        )
+
         # Extract global config
         staging_dir = config_data.get("staging_dir", "./staging")
         state_db = config_data.get("state_db", "./finops_state.db")
-        duckdb_path = config_data.get("duckdb_path", "./data/finops.duckdb")
         parquet_dir = config_data.get("parquet_dir", "./data/parquet")
 
         return cls(
             aws=aws_config,
+            database=database_config,
             staging_dir=staging_dir,
             state_db=state_db,
-            duckdb_path=duckdb_path,
             parquet_dir=parquet_dir
         )
 
@@ -84,7 +141,12 @@ class FinopsConfig:
                 cur_version=cli_args.get("cur_version", "v2"),
                 region=cli_args.get("region", "us-east-1")
             )
-            config = cls(aws=aws_config)
+            # Default to DuckDB for CLI-only config
+            database_config = DatabaseConfig(
+                backend="duckdb",
+                duckdb=DuckDBConfig()
+            )
+            config = cls(aws=aws_config, database=database_config)
 
         # Override with CLI arguments if provided
         if cli_args.get("bucket"):
