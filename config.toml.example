@@ -1,0 +1,25 @@
+# FinOps Pipeline Configuration
+
+# Global settings
+staging_dir = "./data/staging"
+state_db = "./finops_state.db"
+
+[aws]
+# S3 bucket where CUR data is stored
+bucket = "my-cur-bucket"
+
+# S3 prefix path to CUR data
+prefix = "cur-reports"
+
+# CUR export name (from AWS Cost and Usage Reports setup)
+export_name = "my-cur-export"
+
+# AWS credentials
+aws_access_key_id = "AKIAIOSFODNN7EXAMPLE"
+aws_secret_access_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+
+# AWS region where S3 bucket is located
+region = "us-east-1"
+
+# CUR version - v1 (legacy) or v2 (current)
+cur_version = "v2"
