@@ -23,6 +23,7 @@ class FinopsConfig:
     staging_dir: str = "./staging"
     state_db: str = "./finops_state.db"
     duckdb_path: str = "./data/finops.duckdb"
+    parquet_dir: str = "./data/parquet"
 
     @classmethod
     def from_file(cls, config_path: Path) -> "FinopsConfig":
@@ -56,12 +57,14 @@ class FinopsConfig:
         staging_dir = config_data.get("staging_dir", "./staging")
         state_db = config_data.get("state_db", "./finops_state.db")
         duckdb_path = config_data.get("duckdb_path", "./data/finops.duckdb")
+        parquet_dir = config_data.get("parquet_dir", "./data/parquet")
 
         return cls(
             aws=aws_config,
             staging_dir=staging_dir,
             state_db=state_db,
-            duckdb_path=duckdb_path
+            duckdb_path=duckdb_path,
+            parquet_dir=parquet_dir
         )
 
     @classmethod
