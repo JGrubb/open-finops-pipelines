@@ -16,6 +16,36 @@ class BillingExtractorService:
         self.state_db = state_db
         self.s3_client = self._create_s3_client()
 
+    def get_staged_execution_ids(self, staging_dir: str, billing_period: str) -> List[str]:
+        """Get list of execution_ids that are already in staging directory for a billing period."""
+        staging_path = Path(staging_dir) / billing_period
+        if not staging_path.exists():
+            return []
+
+        # List subdirectories (each is an execution_id)
+        execution_ids = []
+        for item in staging_path.iterdir():
+            if item.is_dir():
+                execution_ids.append(item.name)
+
+        return execution_ids
+
+    def clean_old_execution_ids(self, staging_dir: str, billing_period: str, keep_execution_id: str) -> int:
+        """Remove old execution_id directories for a billing period, keeping only the specified one."""
+        staging_path = Path(staging_dir) / billing_period
+        if not staging_path.exists():
+            return 0
+
+        removed_count = 0
+        for item in staging_path.iterdir():
+            if item.is_dir() and item.name != keep_execution_id:
+                print(f"  Removing old execution_id: {item.name}")
+                import shutil
+                shutil.rmtree(item)
+                removed_count += 1
+
+        return removed_count
+
     def _create_s3_client(self):
         """Create S3 client with AWS credentials."""
         try:
@@ -50,11 +80,21 @@ class BillingExtractorService:
 
         for manifest in manifests:
             try:
+                execution_id = manifest['manifest_id']
+                billing_period = manifest['billing_period']
+
+                # Check if already staged in filesystem
+                staged_ids = self.get_staged_execution_ids(staging_dir, billing_period)
+                if execution_id in staged_ids:
+                    print(f"  Skipping {billing_period} ({execution_id}) - already in staging")
+                    stats["manifests_processed"] += 1
+                    continue
+
                 # Update state to downloading
                 self.state_db.update_manifest_state(manifest['manifest_id'], 'downloading')
 
-                # Create subdirectory for this billing period
-                period_dir = staging_path / manifest['billing_period']
+                # Create subdirectory for billing period and execution_id
+                period_dir = staging_path / billing_period / execution_id
                 period_dir.mkdir(parents=True, exist_ok=True)
 
                 # Parse CSV files from JSON
@@ -86,7 +126,12 @@ class BillingExtractorService:
                 # Update state to staged if all files downloaded successfully
                 if len(downloaded_files) == len(csv_files):
                     self.state_db.update_manifest_state(manifest['manifest_id'], 'staged')
-                    print(f"  ✓ All {len(csv_files)} files staged for {manifest['billing_period']}")
+                    print(f"  ✓ All {len(csv_files)} files staged for {billing_period}")
+
+                    # Clean up old execution_ids for this billing period
+                    removed = self.clean_old_execution_ids(staging_dir, billing_period, execution_id)
+                    if removed > 0:
+                        print(f"  Cleaned up {removed} old execution_id(s) for {billing_period}")
                 else:
                     error_msg = f"Only {len(downloaded_files)}/{len(csv_files)} files downloaded"
                     self.state_db.update_manifest_state(manifest['manifest_id'], 'failed', error_msg)
