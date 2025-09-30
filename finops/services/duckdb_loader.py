@@ -79,7 +79,7 @@ class DuckDBLoader:
 
         return column_mapping
 
-    def load_csv_file(self, csv_path: Path, table_name: str, column_mapping: Dict[str, str], manifest_columns: List[Dict]) -> int:
+    def load_csv_file(self, csv_path: Path, table_name: str, column_mapping: Dict[str, str], manifest_columns: List[Dict], execution_id: str) -> int:
         """
         Load a single CSV file into DuckDB table using read_csv.
         Returns number of rows loaded.
@@ -137,10 +137,10 @@ class DuckDBLoader:
 
             columns_struct = "{" + ", ".join(column_specs) + "}"
 
-            # Use INSERT INTO ... SELECT FROM read_csv
+            # Use INSERT INTO ... SELECT FROM read_csv with execution_id added as literal
             insert_sql = f"""
-                INSERT INTO {table_name} ({', '.join(normalized_columns)})
-                SELECT * FROM read_csv(
+                INSERT INTO {table_name} (execution_id, {', '.join(normalized_columns)})
+                SELECT '{execution_id}' AS execution_id, * FROM read_csv(
                     '{csv_path}',
                     columns = {columns_struct},
                     header = true,
@@ -193,10 +193,27 @@ class DuckDBLoader:
             csv_files_json = manifest['csv_files']
             csv_files = json.loads(csv_files_json) if isinstance(csv_files_json, str) else csv_files_json
 
+            # Delete existing data for this billing period before loading
+            if not self.connection:
+                raise RuntimeError("Connection not established. Use within context manager.")
+
+            year, month = billing_period.split("-")
+            delete_result = self.connection.execute(f"""
+                DELETE FROM {table_name}
+                WHERE EXTRACT(YEAR FROM bill_billing_period_start_date) = {year}
+                  AND EXTRACT(MONTH FROM bill_billing_period_start_date) = {month}
+            """)
+            deleted_rows = delete_result.fetchone()
+            if deleted_rows and deleted_rows[0] > 0:
+                print(f"  Deleted {deleted_rows[0]:,} existing rows for {billing_period}")
+            else:
+                print(f"  No existing data found for {billing_period}")
+
             # Load each CSV file
             total_rows = 0
             loaded_files = 0
-            staging_path = Path(staging_dir) / billing_period
+            # Use new staging path structure: staging/{billing_period}/{execution_id}/
+            staging_path = Path(staging_dir) / billing_period / manifest_id
 
             for csv_file in csv_files:
                 # Extract filename from S3 key
@@ -204,7 +221,7 @@ class DuckDBLoader:
                 csv_path = staging_path / filename
 
                 if csv_path.exists():
-                    rows = self.load_csv_file(csv_path, table_name, column_mapping, columns)
+                    rows = self.load_csv_file(csv_path, table_name, column_mapping, columns, manifest_id)
                     total_rows += rows
                     loaded_files += 1
                 else:
@@ -261,17 +278,21 @@ class DuckDBLoader:
         print(f"Table: {table_name}")
         print(f"Staging directory: {staging_dir}")
 
-        # Get staged manifests
-        staged_manifests = self.state_db.get_manifests_by_state("staged")
+        # Get all manifests that have been extracted (regardless of load state)
+        # This allows reloading data from staging without re-downloading from S3
+        all_states = ["staged", "loading", "loaded", "failed"]
+        all_manifests = []
+        for state in all_states:
+            all_manifests.extend(self.state_db.get_manifests_by_state(state))
 
-        if not staged_manifests:
-            print("No staged manifests found. Run 'finops aws extract-billing' first.")
+        if not all_manifests:
+            print("No manifests found. Run 'finops aws extract-billing' first.")
             return {'total_manifests': 0, 'loaded_manifests': 0, 'failed_manifests': 0, 'total_rows': 0}
 
         # Filter by date range if specified
         if start_date or end_date:
             filtered_manifests = []
-            for manifest in staged_manifests:
+            for manifest in all_manifests:
                 billing_period = manifest['billing_period']
 
                 if start_date and billing_period < start_date:
@@ -281,16 +302,16 @@ class DuckDBLoader:
 
                 filtered_manifests.append(manifest)
 
-            staged_manifests = filtered_manifests
+            all_manifests = filtered_manifests
 
-        if not staged_manifests:
+        if not all_manifests:
             print(f"No manifests found in date range {start_date or 'earliest'} to {end_date or 'latest'}")
             return {'total_manifests': 0, 'loaded_manifests': 0, 'failed_manifests': 0, 'total_rows': 0}
 
         # Sort by billing period (newest first for consistent processing)
-        staged_manifests.sort(key=lambda x: x['billing_period'], reverse=True)
+        all_manifests.sort(key=lambda x: x['billing_period'], reverse=True)
 
-        print(f"Found {len(staged_manifests)} staged manifests to load")
+        print(f"Found {len(all_manifests)} manifests to load")
         print()
 
         # Load each manifest
@@ -299,8 +320,8 @@ class DuckDBLoader:
         failed_manifests = 0
         manifest_results = []
 
-        for i, manifest in enumerate(staged_manifests, 1):
-            print(f"[{i}/{len(staged_manifests)}] ", end="")
+        for i, manifest in enumerate(all_manifests, 1):
+            print(f"[{i}/{len(all_manifests)}] ", end="")
 
             result = self.load_manifest(manifest, staging_dir, table_name)
             manifest_results.append(result)
@@ -316,7 +337,7 @@ class DuckDBLoader:
         # Print summary
         print("=" * 60)
         print("Loading Summary:")
-        print(f"  Total manifests: {len(staged_manifests)}")
+        print(f"  Total manifests: {len(all_manifests)}")
         print(f"  Successfully loaded: {loaded_manifests}")
         print(f"  Failed: {failed_manifests}")
         print(f"  Total rows loaded: {total_rows:,}")
@@ -328,7 +349,7 @@ class DuckDBLoader:
                     print(f"  - {result['billing_period']} ({result['manifest_id']}): {result.get('error', 'Unknown error')}")
 
         return {
-            'total_manifests': len(staged_manifests),
+            'total_manifests': len(all_manifests),
             'loaded_manifests': loaded_manifests,
             'failed_manifests': failed_manifests,
             'total_rows': total_rows,
