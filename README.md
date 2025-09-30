@@ -1,176 +1,257 @@
-# AWS Billing Pipeline Specification
+# Open FinOps Pipelines
 
-A lightweight, vendor-agnostic tool for ingesting cloud billing data into analytical databases. Built with simplicity, testability, and minimal dependencies in mind.
+A lightweight, vendor-agnostic CLI tool for ingesting cloud billing data into analytical databases. Extract AWS Cost and Usage Reports (CUR) from S3, load into DuckDB for local analysis, and optionally sync to BigQuery for cloud-based analytics.
 
-## Vision
+## Features
 
-Transform cloud billing data from multiple vendors (AWS, Azure) into queryable datasets for FinOps analysis, using local databases (DuckDB) or cloud warehouses (BigQuery) as analytical backends.
+- **Multi-stage pipeline**: S3 → Staging → DuckDB → Parquet → BigQuery
+- **Idempotent operations**: Skip already-processed data at every stage
+- **Schema evolution**: Automatically detect and add new columns as AWS introduces them
+- **State tracking**: Query destination databases to avoid reprocessing
+- **Flexible backends**: Use DuckDB locally, BigQuery remotely, or both
+- **CUR v1 & v2 support**: Handle both versions of AWS Cost and Usage Reports
 
 ## Architecture
 
 ```
 ┌─────────────┐    ┌──────────────┐    ┌─────────────┐
-│   Vendors   │    │  Pipeline    │    │  Backends   │
-│             │────│              │────│             │
-│ • AWS CUR   │    │ • Discovery  │    │ • DuckDB    │
-│ • Azure     │    │ • State Mgmt │    │ • BigQuery  │
-└─────────────┘    │ • Processing │    └─────────────┘
+│     S3      │───▶│   Staging    │───▶│   DuckDB    │
+│  CUR Data   │    │   CSV Files  │    │   (Local)   │
+└─────────────┘    └──────────────┘    └──────┬──────┘
+                                              │
+                   ┌──────────────┐           │
+                   │   Parquet    │◀──────────┘
+                   │    Export    │
+                   └──────┬───────┘
+                          │
+                   ┌──────▼───────┐
+                   │  BigQuery    │
+                   │   (Remote)   │
                    └──────────────┘
 ```
 
-**Core Principles:**
-- **Vendor-agnostic**: Common interface for AWS, Azure, and future cloud providers
-- **Backend-flexible**: Support local (DuckDB) and cloud (BigQuery) analytical databases
-- **State-aware**: Track processing to avoid reprocessing and enable resume
-- **Test-driven**: Comprehensive test coverage with TDD development approach
-- **Minimal dependencies**: Use Python standard library when possible
+## Installation
 
-## CLI interface
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/open_finops_pipelines.git
+cd open_finops_pipelines
 
-Each of these steps should be available via a CLI command.
+# Install with uv (recommended)
+uv pip install -e .
 
-```
-Open source FinOps data pipelines for cloud billing analysis
-
-positional arguments:
-  {config,aws}          Available commands
-    config              Display current configuration
-    aws                 AWS billing data operations
-
-options:
-  -h, --help            show this help message and exit
-  --version             show program's version number and exit
-  --config CONFIG, -c CONFIG
-                        Path to config.toml file (default: ./config.toml)
-```
-```
-± uv run finops aws --help
-usage: finops aws [-h] {import-billing,list-manifests,show-state,extract-billing,load-billing} ...
-
-positional arguments:
-  {discover-manifests,extract-manifests,show-state,extract-billing,load-billing}
-                        AWS commands
-    discover-manifests      Import AWS CUR billing data
-    extract-manifests      List available CUR manifest files
-    show-state          Show previous pipeline executions and their state
-    extract-billing     Extract billing files from S3 to staging directory
-    load-billing-local        Load staged billing files into database
-    export-parquet          Exports each month to Parquet format
-    load-billing-remote
-
-options:
-  -h, --help            show this help message and exit
+# Or with pip
+pip install -e .
 ```
 
+## Quick Start
 
-## Pipeline Steps
+1. **Create configuration file:**
+
+```bash
+cp config.toml.example config.toml
+# Edit config.toml with your AWS credentials and S3 bucket details
+```
+
+2. **Run the complete pipeline:**
+
+```bash
+finops aws run-pipeline
+```
+
+Or run individual steps:
+
+```bash
+# 1. Discover available manifests (diagnostic)
+finops aws discover-manifests
+
+# 2. Extract billing files from S3
+finops aws extract-billing
+
+# 3. Load to local DuckDB
+finops aws load-billing-local
+
+# 4. Export to Parquet
+finops aws export-parquet
+
+# 5. Load to BigQuery (optional)
+finops aws load-billing-remote
+```
+
+## CLI Commands
+
+### Global Commands
+
+```bash
+finops config                    # Display current configuration
+finops --version                 # Show version
+finops --help                    # Show help
+```
+
+### AWS Commands
+
+```bash
+# Diagnostic: Check what data is available vs loaded
+finops aws discover-manifests [--bucket BUCKET] [--prefix PREFIX] [--export-name NAME]
+
+# Extract billing files from S3 to staging directory
+finops aws extract-billing [--start-date YYYY-MM] [--end-date YYYY-MM] [--staging-dir PATH]
+
+# Load staged files into local DuckDB
+finops aws load-billing-local [--start-date YYYY-MM] [--end-date YYYY-MM]
+
+# Export DuckDB data to Parquet files
+finops aws export-parquet [--output-dir PATH] [--start-date YYYY-MM] [--end-date YYYY-MM] [--overwrite]
+
+# Load Parquet files to BigQuery
+finops aws load-billing-remote [--start-date YYYY-MM] [--end-date YYYY-MM] [--overwrite]
+
+# Run complete pipeline (all steps)
+finops aws run-pipeline [--start-date YYYY-MM] [--end-date YYYY-MM] [--dry-run]
+```
+
+## Configuration
+
+Configuration is stored in `config.toml`:
+
+```toml
+# Global settings
+staging_dir = "./data/staging"
+parquet_dir = "./data/exports"
+
+[database.duckdb]
+database_path = "./data/finops.duckdb"
+
+[database.bigquery]
+project_id = "your-project"
+dataset_id = "your_dataset"
+table_id = "aws_billing_data"
+credentials_path = "/path/to/service-account.json"
+
+[aws]
+bucket = "your-cur-bucket"
+prefix = "path/to/cur"
+export_name = "your-export-name"
+cur_version = "v2"  # or "v1"
+aws_access_key_id = "YOUR_KEY"
+aws_secret_access_key = "YOUR_SECRET"
+region = "us-east-1"
+```
+
+## How It Works
 
 ### 1. Manifest Discovery
-```python
-def discover_manifests():
-    manifests = s3_client.list_manifests(bucket, prefix, export_name) # there are slight difference in pathing 
-    # between v1 and v2, this is the biggert difference in the
-    # algo between the two.
-    manifests.sort(key=billing_month, reverse=True)  # newest first
-    for manifest in manifests:
-        extract_manifest(manifest.id, manifest.billing_month_start_date)
-    return manifests
+
+Scans S3 for CUR manifest files and determines what data is available:
+- Lists manifest JSON files from S3
+- Parses billing periods and execution IDs
+- Queries destination databases to check what's already loaded
+- Returns only unprocessed manifests
+
+### 2. Billing Extraction
+
+Downloads CSV files from S3 to local staging directory:
+- Creates directory structure: `{staging_dir}/{billing_period}/{execution_id}/`
+- Skips already-downloaded files (idempotent)
+- Auto-cleans old execution IDs for same billing period
+
+### 3. DuckDB Loading
+
+Loads CSV data into local DuckDB with schema evolution:
+- Automatically creates table on first run
+- Detects new columns from manifests and adds them via ALTER TABLE
+- Normalizes column names (`identity/LineItemId` → `identity_line_item_id`)
+- Forces `resourcetags_*` columns to VARCHAR
+- Deletes existing billing period data before loading new execution
+- Tracks execution_id for deduplication
+
+### 4. Parquet Export
+
+Exports DuckDB data to monthly Parquet files:
+- One file per billing period: `{billing_period}_aws_billing.parquet`
+- Snappy compression by default
+- Skips existing files unless `--overwrite` specified
+
+### 5. BigQuery Loading
+
+Loads Parquet files to BigQuery:
+- Auto-creates table with monthly partitioning on `bill_billing_period_start_date`
+- Clusters on `line_item_usage_start_date`
+- DELETE + APPEND strategy per billing period
+- Schema evolution via `ALLOW_FIELD_ADDITION`
+
+## State Management
+
+The pipeline uses a stateless approach, checking actual data sources instead of maintaining a separate state database:
+
+- **Extraction state**: Filesystem (checks staging directory)
+- **Loading state**: DuckDB (queries for execution_ids)
+- **Remote state**: BigQuery (queries for billing periods)
+
+This ensures state is always accurate and eliminates sync issues.
+
+## Schema Evolution
+
+As AWS adds new columns to CUR data:
+
+1. Manifest contains column definitions
+2. DuckDB loader detects new columns
+3. Executes `ALTER TABLE ADD COLUMN` for each new field
+4. Loads data with expanded schema
+5. BigQuery inherits schema from Parquet (auto-detects new fields)
+
+Special handling:
+- `resourcetags_*` columns forced to VARCHAR (prevents type conflicts)
+- Column names normalized (replace `/` and special chars with `_`)
+- Manifests sorted DESC by billing_month to establish schema early
+
+## Development
+
+```bash
+# Install development dependencies
+uv pip install -e ".[dev]"
+
+# Run tests
+pytest
+
+# Check types
+mypy finops/
+
+# Format code
+black finops/
 ```
 
-### 2. Manifest Extraction
-```python
-def extract_manifest(manifest):
-    # manifest.id is assembly_id in v1, execution_id in v2
-    state_db.update(manifest.id, "downloading manifest")
-    local_path = staging_dir / manifest.id
-    path_to_manifest = s3_client.download(manifest.files, local_path)
-    decompress_files(local_path)
-    state_db.update(manifest.id, path_to_manifest, "downloaded manifest")
-    return local_path
+## Project Structure
+
+```
+finops/
+├── cli.py                      # Main CLI entry point
+├── config.py                   # Configuration management
+├── commands/
+│   └── aws.py                  # AWS command implementations
+└── services/
+    ├── manifest_discovery.py   # S3 manifest scanning
+    ├── billing_extractor.py    # S3 → staging download
+    ├── duckdb_loader.py        # CSV → DuckDB loading
+    ├── parquet_exporter.py     # DuckDB → Parquet export
+    ├── bigquery_loader.py      # Parquet → BigQuery loading
+    ├── state_checker.py        # Query destination databases
+    └── schema_manager.py       # Schema evolution logic
 ```
 
-### 4. Billing Extraction
-```python
-def extract_billing_files():
-    # Query state DB for new manifests, group by month
-    new_manifests = state_db.query("""
-        SELECT * FROM manifests
-        WHERE state = 'staged'
-        ORDER BY billing_month DESC
-    """)
+## Roadmap
 
-    for manifest in new_manifests:
-        staging_path = load_manifest(manifest)
-        yield {
-            'manifest_id': manifest.id,
-            'billing_month': manifest.billing_month,
-            'files': staging_path.glob('*.csv')
-        }
-```
+- [ ] Azure billing support
+- [ ] GCP billing support
+- [ ] ClickHouse backend support
+- [ ] Web UI for pipeline monitoring
+- [ ] Cost anomaly detection
+- [ ] Budget alerting
 
-### 5. Billing Load (DuckDB)
-```python
-def load_to_duckdb(billing_data):
-    state_db.update(manifest.id, "loading")
+## License
 
-    for file in billing_data.files:
-        # Schema negotiation
-        columns = detect_columns(file)
-        clean_columns = normalize_column_names(columns) #convert all nonalphanumeric to _
-        types = detect_types(file, force_resourcetags_varchar=True)
+MIT
 
-        # Table management
-        if not table_exists(billing_data.billing_month):
-            create_table(clean_columns, types)
-        else:
-            add_missing_columns(existing_table, clean_columns, types)
+## Contributing
 
-        # Data load
-        delete_existing_month_data(billing_data.billing_month)
-        bulk_insert(file, target_table)
-
-    state_db.update(manifest.id, "loaded")
-```
-
-## Remote Pipeline Extension
-
-### 6. Export to Parquet
-```python
-def export_to_parquet(month_range):
-    for month in month_range:
-        duckdb.execute("""
-            COPY (SELECT * FROM billing_data
-            WHERE billing_month = {month}
-            ORDER BY billing_month DESC)
-            TO 'export.parquet' (FORMAT PARQUET)
-        """)
-```
-
-### 7. Load to BigQuery
-```python
-def load_to_bigquery():
-    bq_client.load_table_from_file(
-        'export.parquet',
-        table_id='billing.aws_data',
-        job_config=LoadJobConfig(
-            source_format=SourceFormat.PARQUET,
-            write_disposition=WriteDisposition.WRITE_TRUNCATE
-        )
-    )
-```
-
-## State Transitions
-```
-discovered -> downloading -> staged -> loading -> loaded
-     |            |           |         |
-   failed      failed      failed    failed
-```
-
-## Key Implementation Notes
-
-- **Sort manifests DESC by billing_month** to establish proper schema first
-- **Force resourcetags_* columns to VARCHAR** to prevent type confusion
-- **Clean column names**: `identity/LineItemId` -> `identity_lineitemid`
-- **Additive schema evolution**: ALTER TABLE to add new columns
-- **Batch operations**: CREATE TABLE AS SELECT, bulk inserts
-- **State tracking**: SQLite DB with vendor, manifest_id, billing_month, state
+Contributions welcome! Please open an issue or PR.
