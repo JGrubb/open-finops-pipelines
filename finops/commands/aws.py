@@ -164,12 +164,10 @@ def setup_aws_parser(subparsers):
 
 
 def discover_manifests(config_path, args):
-    """Discover AWS CUR manifests and save to state database."""
+    """Discover AWS CUR manifests from S3."""
     from finops.config import FinopsConfig
     from finops.services.manifest_discovery import ManifestDiscoveryService
-    from finops.services.state_db import StateDB
     from finops.services.state_checker import StateChecker
-    from pathlib import Path
 
     print("🔍 Discovering AWS CUR manifests...")
 
@@ -193,29 +191,19 @@ def discover_manifests(config_path, args):
         print(f"Version: {config.aws.cur_version}")
         print()
 
-        # Initialize state database
-        state_db = StateDB(Path(config.state_db))
-
         # Initialize state checker to query destination databases
         state_checker = StateChecker(config)
 
-        # Discover manifests and persist to database
-        discovery_service = ManifestDiscoveryService(config.aws, state_db, state_checker)
+        # Discover manifests
+        discovery_service = ManifestDiscoveryService(config.aws, state_checker)
         manifests = discovery_service.discover_manifests()
 
         # Display results
         summary = discovery_service.get_manifest_summary(manifests)
         print(summary)
 
-        # Show state summary
-        state_summary = state_db.get_manifest_summary()
-        print(f"\nState database summary:")
-        for state, count in state_summary.items():
-            print(f"  {state}: {count}")
-
         if manifests:
-            print(f"\nNext step: Use 'finops aws extract-manifests' to download CSV files")
-            print(f"Or use 'finops aws show-state' to view detailed state information")
+            print(f"\nNext step: Use 'finops aws extract-billing' to download CSV files")
 
     except Exception as e:
         print(f"Error: {e}")
@@ -286,9 +274,9 @@ def show_state(config_path, args):
 def extract_billing(config_path, args):
     """Extract billing files from S3."""
     from finops.config import FinopsConfig
-    from finops.services.state_db import StateDB
+    from finops.services.manifest_discovery import ManifestDiscoveryService
     from finops.services.billing_extractor import BillingExtractorService
-    from pathlib import Path
+    from finops.services.state_checker import StateChecker
 
     print("💾 Extracting billing files from S3...")
 
@@ -296,9 +284,6 @@ def extract_billing(config_path, args):
         # Load configuration
         config = FinopsConfig.from_cli_args(config_path, {})
         config.validate()
-
-        # Initialize state database
-        state_db = StateDB(Path(config.state_db))
 
         # Validate date arguments
         start_date = args.start_date
@@ -321,16 +306,41 @@ def extract_billing(config_path, args):
         elif end_date:
             print(f"Up to: {end_date}")
         else:
-            print("All discovered manifests")
+            print("All manifests")
 
         print(f"Staging directory: {staging_dir}")
         print()
 
+        # Discover manifests from S3
+        print("Discovering manifests...")
+        state_checker = StateChecker(config)
+        discovery_service = ManifestDiscoveryService(config.aws, state_checker)
+        manifests = discovery_service.discover_manifests()
+
+        # Filter by date range if specified
+        if start_date or end_date:
+            filtered_manifests = []
+            for manifest in manifests:
+                billing_period = manifest.billing_period
+                if start_date and billing_period < start_date:
+                    continue
+                if end_date and billing_period > end_date:
+                    continue
+                filtered_manifests.append(manifest)
+            manifests = filtered_manifests
+
+        if not manifests:
+            print("No manifests to extract")
+            return
+
+        print(f"Found {len(manifests)} manifest(s) to extract")
+        print()
+
         # Initialize billing extractor
-        extractor = BillingExtractorService(config.aws, state_db)
+        extractor = BillingExtractorService(config.aws)
 
         # Extract files
-        stats = extractor.extract_billing_files(start_date, end_date, staging_dir)
+        stats = extractor.extract_billing_files(manifests, staging_dir)
 
         # Display results
         print(f"\nExtraction complete:")
