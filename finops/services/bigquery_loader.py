@@ -1,6 +1,7 @@
 import uuid
 from pathlib import Path
 from typing import List, Dict
+from datetime import datetime
 
 from google.cloud import bigquery
 from google.oauth2 import service_account
@@ -82,8 +83,8 @@ class BigQueryLoader:
             # Update state to loading
             self.state_db.update_export_state(load_id, "exporting")
 
-            # Load to BigQuery from Parquet file
-            self._load_parquet_to_bigquery(parquet_file, overwrite)
+            # Load to BigQuery from Parquet file with DELETE + APPEND
+            self._load_parquet_to_bigquery(parquet_file, billing_period)
 
             # Update state to loaded
             self.state_db.update_export_state(load_id, "exported")
@@ -94,32 +95,44 @@ class BigQueryLoader:
             self.state_db.update_export_state(load_id, "failed", str(e))
             raise
 
-    def _load_parquet_to_bigquery(self, parquet_file: Path, overwrite: bool) -> None:
-        """Load a Parquet file to BigQuery, replacing the partition for that billing period."""
+    def _load_parquet_to_bigquery(self, parquet_file: Path, billing_period: str) -> None:
+        """Load a Parquet file to BigQuery, replacing the partition for that billing period.
+
+        Always performs DELETE + APPEND to ensure data is replaced, not duplicated.
+        """
         # Ensure table exists with proper partitioning and clustering
         self._ensure_table_exists()
 
-        # Extract billing period from filename for partition replacement
-        billing_period = parquet_file.stem.split('_')[0]  # Extract "2025-09" from "2025-09_aws_billing.parquet"
-        year, month = billing_period.split('-')
+        # Convert billing period to timestamp (e.g., "2025-09" -> "2025-09-01 00:00:00")
+        billing_timestamp = datetime.strptime(f"{billing_period}-01", "%Y-%m-%d")
 
-        print(f"✓ Replacing partition {billing_period} in BigQuery table")
+        print(f"   Deleting existing data for {billing_period}...")
 
-        # First, delete existing data for this billing period
+        # Delete existing data for this billing period
         delete_query = f"""
         DELETE FROM `{self.table_ref}`
-        WHERE EXTRACT(YEAR FROM bill_billing_period_start_date) = {year}
-          AND EXTRACT(MONTH FROM bill_billing_period_start_date) = {int(month)}
+        WHERE bill_billing_period_start_date = TIMESTAMP('{billing_timestamp.isoformat()}')
         """
 
         delete_job = self.client.query(delete_query)
-        delete_job.result()  # Wait for deletion to complete
+        result = delete_job.result()  # Wait for deletion to complete
+
+        # Get number of rows deleted
+        if delete_job.num_dml_affected_rows:
+            print(f"   ✓ Deleted {delete_job.num_dml_affected_rows:,} existing rows")
+        else:
+            print(f"   ✓ No existing data found for {billing_period}")
+
+        print(f"   📤 Loading {parquet_file.name} to BigQuery...")
 
         # Configure the load job to append the new data
+        # Use schema_update_options to allow field addition if needed
         job_config = bigquery.LoadJobConfig(
             source_format=bigquery.SourceFormat.PARQUET,
             write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
-            autodetect=True
+            schema_update_options=[
+                bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION
+            ]
         )
 
         # Load the Parquet file
@@ -135,6 +148,12 @@ class BigQueryLoader:
 
         if job.errors:
             raise Exception(f"BigQuery load job failed: {job.errors}")
+
+        # Report rows loaded
+        if job.output_rows:
+            print(f"   ✓ Loaded {job.output_rows:,} rows to partition {billing_period}")
+        else:
+            print(f"   ✓ Load completed for {billing_period}")
 
     def _ensure_table_exists(self) -> None:
         """Ensure the BigQuery table exists with proper partitioning and clustering."""
