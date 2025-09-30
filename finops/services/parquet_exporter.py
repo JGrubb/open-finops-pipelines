@@ -4,15 +4,11 @@ from pathlib import Path
 from typing import List, Dict, Optional
 from datetime import datetime
 
-from finops.services.state_db import StateDB
-
-
 class ParquetExporter:
     """Service for exporting DuckDB data to Parquet files."""
 
-    def __init__(self, duckdb_path: str, state_db: StateDB, parquet_dir: str, table_name: str = "aws_billing_data"):
+    def __init__(self, duckdb_path: str, parquet_dir: str, table_name: str = "aws_billing_data"):
         self.duckdb_path = Path(duckdb_path)
-        self.state_db = state_db
         self.parquet_dir = Path(parquet_dir)
         self.table_name = table_name
         self.parquet_dir.mkdir(parents=True, exist_ok=True)
@@ -61,40 +57,23 @@ class ParquetExporter:
         compression: str
     ) -> str:
         """Export a single billing period to Parquet."""
-        export_id = str(uuid.uuid4())
-        export_type = "parquet"
         filename = f"{billing_period}_{vendor}_billing.parquet"
         file_path = self.parquet_dir / filename
 
         # Check if export already exists and overwrite is False
-        existing_export = self.state_db.get_export_status(vendor, billing_period, export_type)
-        if existing_export and existing_export["state"] == "exported" and not overwrite:
-            if file_path.exists():
-                return "skipped"
+        if file_path.exists() and not overwrite:
+            return "skipped"
 
         # Check if data exists in DuckDB for this billing period
         if not self._has_data_for_period(billing_period, vendor):
             raise ValueError(f"No data found in DuckDB for billing period {billing_period}")
 
-        # Save export record as pending
-        self.state_db.save_export(
-            export_id, vendor, billing_period, export_type, str(file_path), "pending"
-        )
-
         try:
-            # Update state to exporting
-            self.state_db.update_export_state(export_id, "exporting")
-
             # Export to Parquet using DuckDB
             self._export_to_parquet(billing_period, vendor, file_path, compression)
-
-            # Update state to exported
-            self.state_db.update_export_state(export_id, "exported")
             return "exported"
 
         except Exception as e:
-            # Update state to failed
-            self.state_db.update_export_state(export_id, "failed", str(e))
             raise
 
     def _has_data_for_period(self, billing_period: str, vendor: str) -> bool:
@@ -155,17 +134,7 @@ class ParquetExporter:
 
             return [row[0] for row in result]
         except Exception:
-            # Fallback to state database if DuckDB query fails
-            return self.state_db.get_loaded_billing_periods(vendor)
-
-    def get_export_summary(self, vendor: str = "aws") -> Dict:
-        """Get summary of export operations by state."""
-        exports_by_state = {}
-        for state in ["pending", "exporting", "exported", "failed"]:
-            exports = self.state_db.get_exports_by_state(state, vendor)
-            exports_by_state[state] = len(exports)
-
-        return exports_by_state
+            return []
 
     def validate_table_exists(self) -> bool:
         """Validate that the table exists and has data."""

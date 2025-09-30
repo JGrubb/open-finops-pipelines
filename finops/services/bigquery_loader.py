@@ -6,14 +6,10 @@ from datetime import datetime
 from google.cloud import bigquery
 from google.oauth2 import service_account
 
-from finops.services.state_db import StateDB
-
-
 class BigQueryLoader:
     """Service for loading Parquet files to BigQuery."""
 
-    def __init__(self, state_db: StateDB, bigquery_config, parquet_dir: str):
-        self.state_db = state_db
+    def __init__(self, bigquery_config, parquet_dir: str):
         self.bigquery_config = bigquery_config
         self.parquet_dir = Path(parquet_dir)
 
@@ -61,38 +57,17 @@ class BigQueryLoader:
         overwrite: bool
     ) -> str:
         """Load a single billing period to BigQuery from Parquet file."""
-        load_id = str(uuid.uuid4())
-        load_type = "bigquery"
-
-        # Check if load already exists and overwrite is False
-        existing_load = self.state_db.get_export_status(vendor, billing_period, load_type)
-        if existing_load and existing_load["state"] == "exported" and not overwrite:
-            return "skipped"
-
         # Check if Parquet file exists for this billing period
         parquet_file = self.parquet_dir / f"{billing_period}_{vendor}_billing.parquet"
         if not parquet_file.exists():
             raise ValueError(f"Parquet file not found: {parquet_file}")
 
-        # Save load record as pending
-        self.state_db.save_export(
-            load_id, vendor, billing_period, load_type, self.table_ref, "pending"
-        )
-
         try:
-            # Update state to loading
-            self.state_db.update_export_state(load_id, "exporting")
-
             # Load to BigQuery from Parquet file with DELETE + APPEND
             self._load_parquet_to_bigquery(parquet_file, billing_period)
-
-            # Update state to loaded
-            self.state_db.update_export_state(load_id, "exported")
             return "loaded"
 
         except Exception as e:
-            # Update state to failed
-            self.state_db.update_export_state(load_id, "failed", str(e))
             raise
 
     def _load_parquet_to_bigquery(self, parquet_file: Path, billing_period: str) -> None:
@@ -222,26 +197,19 @@ class BigQueryLoader:
 
     def get_available_billing_periods(self, vendor: str = "aws") -> List[str]:
         """Get list of billing periods that have exported Parquet files available for BigQuery load."""
-        # Get exported parquet files from state database
-        all_exports = self.state_db.get_exports_by_state("exported", vendor)
-        exported_parquet = [exp for exp in all_exports if exp["export_type"] == "parquet"]
+        # Scan parquet directory for available files
+        parquet_files = list(self.parquet_dir.glob(f"*_{vendor}_billing.parquet"))
 
         billing_periods = []
-        for export in exported_parquet:
-            billing_periods.append(export["billing_period"])
+        for file in parquet_files:
+            # Extract billing period from filename: YYYY-MM_aws_billing.parquet
+            parts = file.stem.split("_")
+            if len(parts) >= 2:
+                billing_period = parts[0]  # YYYY-MM
+                billing_periods.append(billing_period)
 
         # Remove duplicates and sort
         return sorted(list(set(billing_periods)), reverse=True)
-
-    def get_load_summary(self, vendor: str = "aws") -> Dict:
-        """Get summary of BigQuery load operations by state."""
-        loads_by_state = {}
-        for state in ["pending", "exporting", "exported", "failed"]:
-            all_exports = self.state_db.get_exports_by_state(state, vendor)
-            bigquery_loads = [exp for exp in all_exports if exp["export_type"] == "bigquery"]
-            loads_by_state[state] = len(bigquery_loads)
-
-        return loads_by_state
 
     def validate_bigquery_connection(self) -> bool:
         """Validate BigQuery connection and dataset access."""

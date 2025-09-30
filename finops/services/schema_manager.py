@@ -3,9 +3,6 @@ import re
 from typing import Dict, List, Set, Tuple, Optional
 from dataclasses import dataclass
 
-from finops.services.state_db import StateDB
-
-
 @dataclass
 class ColumnDefinition:
     """Represents a normalized column definition for DuckDB."""
@@ -28,9 +25,6 @@ class SchemaManager:
         "DateTime": "TIMESTAMP",
         "Interval": "VARCHAR",  # Time intervals stored as strings
     }
-
-    def __init__(self, state_db: StateDB):
-        self.state_db = state_db
 
     def normalize_column_name(self, column_name: str) -> str:
         """
@@ -148,64 +142,6 @@ class SchemaManager:
 
         return columns
 
-    def get_unified_schema(self, billing_periods: Optional[List[str]] = None) -> List[ColumnDefinition]:
-        """
-        Build unified schema from all manifests or specific billing periods.
-        Returns list of normalized column definitions.
-        """
-        if billing_periods:
-            manifests = []
-            for period in billing_periods:
-                period_manifests = self.state_db.get_manifests_by_billing_period(period)
-                manifests.extend(period_manifests)
-        else:
-            # Get all discovered and staged manifests
-            discovered = self.state_db.get_manifests_by_state("discovered")
-            staged = self.state_db.get_manifests_by_state("staged")
-            manifests = discovered + staged
-
-        # Collect all columns across all manifests, handling duplicates
-        all_columns: Dict[str, ColumnDefinition] = {}
-        seen_normalized_names = {}
-
-        for manifest in manifests:
-            columns_json = manifest['columns_schema']
-            columns = json.loads(columns_json) if isinstance(columns_json, str) else columns_json
-
-            for col in columns:
-                # The actual CSV column name is category/name (e.g., "identity/LineItemId")
-                category = col['category']
-                name = col['name']
-                original_name = f"{category}/{name}"
-                base_normalized_name = self.normalize_column_name(original_name)
-                aws_type = col['type']
-
-                # Handle duplicate normalized names by adding suffix
-                if base_normalized_name in seen_normalized_names:
-                    seen_normalized_names[base_normalized_name] += 1
-                    normalized_name = f"{base_normalized_name}_{seen_normalized_names[base_normalized_name]}"
-                else:
-                    seen_normalized_names[base_normalized_name] = 0
-                    normalized_name = base_normalized_name
-
-                # Force resourceTags to VARCHAR regardless of original type
-                if category == 'resourceTags':
-                    duckdb_type = "VARCHAR"
-                else:
-                    duckdb_type = self.TYPE_MAPPING.get(aws_type, "VARCHAR")
-
-                # Use original_name as key since normalized names might have duplicates
-                if original_name not in all_columns:
-                    all_columns[original_name] = ColumnDefinition(
-                        original_name=original_name,
-                        normalized_name=normalized_name,
-                        category=category,
-                        aws_type=aws_type,
-                        duckdb_type=duckdb_type
-                    )
-
-        # Sort columns for consistent ordering
-        return sorted(all_columns.values(), key=lambda x: (x.category, x.normalized_name))
 
     def generate_create_table_sql(self, table_name: str, schema: List[ColumnDefinition]) -> str:
         """Generate CREATE TABLE SQL statement for DuckDB."""

@@ -5,15 +5,14 @@ from typing import List, Dict
 from botocore.exceptions import ClientError, NoCredentialsError
 
 from finops.config import AWSConfig
-from finops.services.state_db import StateDB
+from finops.models.manifest import CURManifest
 
 
 class BillingExtractorService:
     """Service for downloading billing CSV files from S3."""
 
-    def __init__(self, aws_config: AWSConfig, state_db: StateDB):
+    def __init__(self, aws_config: AWSConfig):
         self.aws_config = aws_config
-        self.state_db = state_db
         self.s3_client = self._create_s3_client()
 
     def get_staged_execution_ids(self, staging_dir: str, billing_period: str) -> List[str]:
@@ -60,14 +59,10 @@ class BillingExtractorService:
 
     def extract_billing_files(
         self,
-        start_date: str = None,
-        end_date: str = None,
+        manifests: List[CURManifest],
         staging_dir: str = "./staging"
     ) -> Dict[str, int]:
-        """Extract billing CSV files for discovered manifests in date range."""
-
-        # Get discovered manifests in date range
-        manifests = self.state_db.get_discovered_manifests_by_date_range(start_date, end_date)
+        """Extract billing CSV files for provided manifests."""
 
         if not manifests:
             return {"manifests_processed": 0, "files_downloaded": 0, "errors": 0}
@@ -80,8 +75,8 @@ class BillingExtractorService:
 
         for manifest in manifests:
             try:
-                execution_id = manifest['manifest_id']
-                billing_period = manifest['billing_period']
+                execution_id = manifest.id
+                billing_period = manifest.billing_period
 
                 # Check if already staged in filesystem
                 staged_ids = self.get_staged_execution_ids(staging_dir, billing_period)
@@ -90,15 +85,14 @@ class BillingExtractorService:
                     stats["manifests_processed"] += 1
                     continue
 
-                # Update state to downloading
-                self.state_db.update_manifest_state(manifest['manifest_id'], 'downloading')
+                print(f"Extracting {billing_period} ({execution_id})")
 
                 # Create subdirectory for billing period and execution_id
                 period_dir = staging_path / billing_period / execution_id
                 period_dir.mkdir(parents=True, exist_ok=True)
 
-                # Parse CSV files from JSON
-                csv_files = json.loads(manifest['csv_files'])
+                # Get CSV files from manifest
+                csv_files = manifest.files
 
                 downloaded_files = []
                 for csv_file_key in csv_files:
@@ -110,7 +104,7 @@ class BillingExtractorService:
                         print(f"  Downloading {csv_file_key} -> {local_path}")
 
                         self.s3_client.download_file(
-                            manifest['s3_bucket'],
+                            manifest.bucket,
                             csv_file_key,
                             str(local_path)
                         )
@@ -123,9 +117,8 @@ class BillingExtractorService:
                         stats["errors"] += 1
                         continue
 
-                # Update state to staged if all files downloaded successfully
+                # Check if all files downloaded successfully
                 if len(downloaded_files) == len(csv_files):
-                    self.state_db.update_manifest_state(manifest['manifest_id'], 'staged')
                     print(f"  ✓ All {len(csv_files)} files staged for {billing_period}")
 
                     # Clean up old execution_ids for this billing period
@@ -134,16 +127,14 @@ class BillingExtractorService:
                         print(f"  Cleaned up {removed} old execution_id(s) for {billing_period}")
                 else:
                     error_msg = f"Only {len(downloaded_files)}/{len(csv_files)} files downloaded"
-                    self.state_db.update_manifest_state(manifest['manifest_id'], 'failed', error_msg)
-                    print(f"  ✗ Partial download for {manifest['billing_period']}: {error_msg}")
+                    print(f"  ✗ Partial download for {billing_period}: {error_msg}")
                     stats["errors"] += 1
 
                 stats["manifests_processed"] += 1
 
             except Exception as manifest_error:
                 error_msg = f"Error processing manifest: {manifest_error}"
-                self.state_db.update_manifest_state(manifest['manifest_id'], 'failed', error_msg)
-                print(f"  ✗ Failed {manifest['billing_period']}: {error_msg}")
+                print(f"  ✗ Failed {billing_period}: {error_msg}")
                 stats["errors"] += 1
 
         return stats

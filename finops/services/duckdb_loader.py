@@ -4,17 +4,15 @@ import csv
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 import duckdb
-from finops.services.state_db import StateDB
 from finops.services.schema_manager import SchemaManager
 
 
 class DuckDBLoader:
     """Handles loading AWS CUR data into DuckDB with schema evolution."""
 
-    def __init__(self, database_path: str, state_db: StateDB):
+    def __init__(self, database_path: str):
         self.database_path = database_path
-        self.state_db = state_db
-        self.schema_manager = SchemaManager(state_db)
+        self.schema_manager = SchemaManager()
         self.connection: Optional[duckdb.DuckDBPyConnection] = None
 
     def __enter__(self):
@@ -51,14 +49,14 @@ class DuckDBLoader:
         column_mapping = self.schema_manager.create_column_mapping(manifest_columns)
 
         if not existing_columns:
-            # Create table with full schema from all known manifests
+            # Create table with schema from this manifest
             print(f"Creating new table: {table_name}")
-            full_schema = self.schema_manager.get_unified_schema()
-            create_sql = self.schema_manager.generate_create_table_sql(table_name, full_schema)
+            manifest_schema = self.schema_manager._process_manifest_columns(manifest_columns)
+            create_sql = self.schema_manager.generate_create_table_sql(table_name, manifest_schema)
             if not self.connection:
                 raise RuntimeError("Connection not established. Use within context manager.")
             self.connection.execute(create_sql)
-            print(f"Created table with {len(full_schema)} columns")
+            print(f"Created table with {len(manifest_schema)} columns (plus execution_id)")
 
         # Always check for new columns from this specific manifest
         # Get fresh list of existing columns after potential table creation
@@ -169,29 +167,29 @@ class DuckDBLoader:
             print(f"    Error loading {csv_path.name}: {str(e)}")
             raise
 
-    def load_manifest(self, manifest: Dict, staging_dir: str, table_name: str = "aws_billing_data") -> Dict:
+    def load_execution_from_staging(
+        self,
+        billing_period: str,
+        execution_id: str,
+        staging_dir: str,
+        columns: List[Dict],
+        table_name: str = "aws_billing_data"
+    ) -> Dict:
         """
-        Load all CSV files for a specific manifest.
+        Load billing data for a specific execution_id from staging directory.
         Returns loading statistics.
         """
-        manifest_id = manifest['manifest_id']
-        billing_period = manifest['billing_period']
+        print(f"Loading {billing_period} ({execution_id})")
 
-        print(f"Loading manifest: {billing_period} ({manifest_id})")
-
-        csv_files = []  # Initialize for error handling
         try:
-            # Update state to loading
-            self.state_db.update_manifest_state(manifest_id, "loading")
-
-            # Parse column schema and ensure table exists
-            columns_json = manifest['columns_schema']
-            columns = json.loads(columns_json) if isinstance(columns_json, str) else columns_json
+            # Ensure table exists with proper schema
             column_mapping = self.ensure_table_schema(table_name, columns)
 
-            # Parse CSV files list
-            csv_files_json = manifest['csv_files']
-            csv_files = json.loads(csv_files_json) if isinstance(csv_files_json, str) else csv_files_json
+            # Get staging path for this execution_id
+            staging_path = Path(staging_dir) / billing_period / execution_id
+
+            if not staging_path.exists():
+                raise ValueError(f"Staging directory not found: {staging_path}")
 
             # Delete existing data for this billing period before loading
             if not self.connection:
@@ -209,65 +207,55 @@ class DuckDBLoader:
             else:
                 print(f"  No existing data found for {billing_period}")
 
-            # Load each CSV file
+            # Find and load all CSV files in staging directory
+            csv_files = list(staging_path.glob("*.csv.gz")) + list(staging_path.glob("*.csv"))
+
+            if not csv_files:
+                raise ValueError(f"No CSV files found in {staging_path}")
+
             total_rows = 0
             loaded_files = 0
-            # Use new staging path structure: staging/{billing_period}/{execution_id}/
-            staging_path = Path(staging_dir) / billing_period / manifest_id
 
-            for csv_file in csv_files:
-                # Extract filename from S3 key
-                filename = Path(csv_file).name
-                csv_path = staging_path / filename
+            for csv_path in csv_files:
+                rows = self.load_csv_file(csv_path, table_name, column_mapping, columns, execution_id)
+                total_rows += rows
+                loaded_files += 1
 
-                if csv_path.exists():
-                    rows = self.load_csv_file(csv_path, table_name, column_mapping, columns, manifest_id)
-                    total_rows += rows
-                    loaded_files += 1
-                else:
-                    print(f"    Warning: File not found in staging: {filename}")
+            print(f"✓ Completed: {billing_period} - {total_rows:,} rows from {loaded_files} files")
 
-            # Update state to loaded
-            self.state_db.update_manifest_state(manifest_id, "loaded")
-
-            stats = {
-                'manifest_id': manifest_id,
+            return {
+                'execution_id': execution_id,
                 'billing_period': billing_period,
                 'files_loaded': loaded_files,
-                'total_files': len(csv_files),
                 'rows_loaded': total_rows,
                 'status': 'success'
             }
-
-            print(f"✓ Completed: {billing_period} - {total_rows:,} rows from {loaded_files} files")
-            return stats
 
         except Exception as e:
             error_msg = str(e)
             print(f"✗ Failed: {billing_period} - {error_msg}")
 
-            # Update state to failed
-            self.state_db.update_manifest_state(manifest_id, "failed", error_msg)
-
             return {
-                'manifest_id': manifest_id,
+                'execution_id': execution_id,
                 'billing_period': billing_period,
                 'files_loaded': 0,
-                'total_files': len(csv_files),
                 'rows_loaded': 0,
                 'status': 'failed',
                 'error': error_msg
             }
 
-    def load_billing_data(self, staging_dir: str, start_date: Optional[str] = None,
-                         end_date: Optional[str] = None, table_name: str = "aws_billing_data") -> Dict:
+    def load_billing_data_from_manifests(
+        self,
+        manifests: List,
+        staging_dir: str,
+        table_name: str = "aws_billing_data"
+    ) -> Dict:
         """
-        Load billing data from staged CSV files into DuckDB.
+        Load billing data from staged CSV files for given manifests.
 
         Args:
+            manifests: List of CURManifest objects to load
             staging_dir: Directory containing staged CSV files
-            start_date: Optional start date filter (YYYY-MM format)
-            end_date: Optional end date filter (YYYY-MM format)
             table_name: Name of target DuckDB table
 
         Returns:
@@ -278,82 +266,59 @@ class DuckDBLoader:
         print(f"Table: {table_name}")
         print(f"Staging directory: {staging_dir}")
 
-        # Get all manifests that have been extracted (regardless of load state)
-        # This allows reloading data from staging without re-downloading from S3
-        all_states = ["staged", "loading", "loaded", "failed"]
-        all_manifests = []
-        for state in all_states:
-            all_manifests.extend(self.state_db.get_manifests_by_state(state))
+        if not manifests:
+            print("No manifests provided to load.")
+            return {'total_executions': 0, 'loaded_executions': 0, 'failed_executions': 0, 'total_rows': 0}
 
-        if not all_manifests:
-            print("No manifests found. Run 'finops aws extract-billing' first.")
-            return {'total_manifests': 0, 'loaded_manifests': 0, 'failed_manifests': 0, 'total_rows': 0}
-
-        # Filter by date range if specified
-        if start_date or end_date:
-            filtered_manifests = []
-            for manifest in all_manifests:
-                billing_period = manifest['billing_period']
-
-                if start_date and billing_period < start_date:
-                    continue
-                if end_date and billing_period > end_date:
-                    continue
-
-                filtered_manifests.append(manifest)
-
-            all_manifests = filtered_manifests
-
-        if not all_manifests:
-            print(f"No manifests found in date range {start_date or 'earliest'} to {end_date or 'latest'}")
-            return {'total_manifests': 0, 'loaded_manifests': 0, 'failed_manifests': 0, 'total_rows': 0}
-
-        # Sort by billing period (newest first for consistent processing)
-        all_manifests.sort(key=lambda x: x['billing_period'], reverse=True)
-
-        print(f"Found {len(all_manifests)} manifests to load")
+        print(f"Found {len(manifests)} execution(s) to load")
         print()
 
         # Load each manifest
         total_rows = 0
-        loaded_manifests = 0
-        failed_manifests = 0
-        manifest_results = []
+        loaded_count = 0
+        failed_count = 0
+        results = []
 
-        for i, manifest in enumerate(all_manifests, 1):
-            print(f"[{i}/{len(all_manifests)}] ", end="")
+        for i, manifest in enumerate(manifests, 1):
+            print(f"[{i}/{len(manifests)}] ", end="")
 
-            result = self.load_manifest(manifest, staging_dir, table_name)
-            manifest_results.append(result)
+            result = self.load_execution_from_staging(
+                manifest.billing_period,
+                manifest.id,
+                staging_dir,
+                manifest.columns,
+                table_name
+            )
+            results.append(result)
 
             if result['status'] == 'success':
-                loaded_manifests += 1
+                loaded_count += 1
                 total_rows += result['rows_loaded']
             else:
-                failed_manifests += 1
+                failed_count += 1
 
-            print()  # Add spacing between manifests
+            print()  # Add spacing
 
         # Print summary
         print("=" * 60)
         print("Loading Summary:")
-        print(f"  Total manifests: {len(all_manifests)}")
-        print(f"  Successfully loaded: {loaded_manifests}")
-        print(f"  Failed: {failed_manifests}")
+        print(f"  Total executions: {len(manifests)}")
+        print(f"  Successfully loaded: {loaded_count}")
+        print(f"  Failed: {failed_count}")
         print(f"  Total rows loaded: {total_rows:,}")
 
-        if failed_manifests > 0:
-            print(f"\nFailed manifests:")
-            for result in manifest_results:
+        if failed_count > 0:
+            print(f"\nFailed executions:")
+            for result in results:
                 if result['status'] == 'failed':
-                    print(f"  - {result['billing_period']} ({result['manifest_id']}): {result.get('error', 'Unknown error')}")
+                    print(f"  - {result['billing_period']} ({result['execution_id']}): {result.get('error', 'Unknown error')}")
 
         return {
-            'total_manifests': len(all_manifests),
-            'loaded_manifests': loaded_manifests,
-            'failed_manifests': failed_manifests,
+            'total_executions': len(manifests),
+            'loaded_executions': loaded_count,
+            'failed_executions': failed_count,
             'total_rows': total_rows,
-            'results': manifest_results
+            'results': results
         }
 
     def get_table_info(self, table_name: str = "aws_billing_data") -> Optional[Dict]:
