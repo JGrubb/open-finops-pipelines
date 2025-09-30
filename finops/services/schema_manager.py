@@ -211,6 +211,9 @@ class SchemaManager:
         """Generate CREATE TABLE SQL statement for DuckDB."""
         column_definitions = []
 
+        # Always add execution_id as first column
+        column_definitions.append(f"    execution_id VARCHAR")
+
         for col in schema:
             # Column names are already normalized and safe, no need to quote
             column_definitions.append(f"    {col.normalized_name} {col.duckdb_type}")
