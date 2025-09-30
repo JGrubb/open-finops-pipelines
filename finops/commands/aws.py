@@ -211,64 +211,22 @@ def discover_manifests(config_path, args):
 
 
 def extract_manifests(config, args):
-    """Extract manifest files."""
-    print("📦 Extracting manifest files...")
-    print("[STUB] Implementation pending")
+    """Extract manifest files (deprecated)."""
+    print("This command has been deprecated.")
+    print("Manifests are now automatically discovered from S3 when running:")
+    print("  finops aws extract-billing")
+    print("  finops aws load-billing-local")
+    print("\nNo separate manifest extraction step is needed.")
 
 
 def show_state(config_path, args):
-    """Show pipeline execution state."""
-    from finops.config import FinopsConfig
-    from finops.services.state_db import StateDB
-    from pathlib import Path
-    import json
-
-    print("📊 Pipeline execution state:")
-
-    try:
-        # Load configuration
-        config = FinopsConfig.from_cli_args(config_path, {})
-
-        # Initialize state database
-        state_db = StateDB(Path(config.state_db))
-
-        # Get state summary
-        state_summary = state_db.get_manifest_summary()
-        if not state_summary:
-            print("No manifests found in state database.")
-            print("Run 'finops aws discover-manifests' first to populate the database.")
-            return
-
-        print("\nState Summary:")
-        total = 0
-        for state, count in state_summary.items():
-            print(f"  {state}: {count}")
-            total += count
-        print(f"  Total: {total}")
-
-        # Get latest manifests
-        latest = state_db.get_latest_manifests(limit=10)
-        if latest:
-            print(f"\nLatest 10 manifests:")
-            for manifest in latest:
-                files = json.loads(manifest['csv_files'])
-                print(f"  • {manifest['billing_period']} ({manifest['cur_version']}) - "
-                      f"{len(files)} files - {manifest['state']} - {manifest['manifest_id']}")
-
-        # Show state transition counts
-        print(f"\nState Details:")
-        for state in ['discovered', 'downloading', 'staged', 'loading', 'loaded', 'failed']:
-            if state in state_summary:
-                manifests_in_state = state_db.get_manifests_by_state(state)
-                print(f"  {state.title()}: {len(manifests_in_state)} manifests")
-                if state == 'failed':
-                    for manifest in manifests_in_state[:5]:  # Show first 5 failed
-                        error = manifest.get('error_message', 'No error message')
-                        print(f"    - {manifest['billing_period']} {manifest['manifest_id']}: {error}")
-
-    except Exception as e:
-        print(f"Error: {e}")
-        exit(1)
+    """Show pipeline execution state (deprecated)."""
+    print("This command has been deprecated.")
+    print("\nThe pipeline now uses filesystem and destination databases for state.")
+    print("\nTo check state:")
+    print("  - Staging directory shows what's downloaded")
+    print("  - Run 'finops aws discover-manifests' to see what's loaded vs available in S3")
+    print("  - Query DuckDB or BigQuery directly to see loaded data")
 
 
 def extract_billing(config_path, args):

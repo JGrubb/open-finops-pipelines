@@ -45,8 +45,17 @@ class FinopsConfig:
     aws: AWSConfig
     database: DatabaseConfig
     staging_dir: str = "./staging"
-    state_db: str = "./finops_state.db"
     parquet_dir: str = "./data/parquet"
+
+    @property
+    def duckdb(self) -> Optional[DuckDBConfig]:
+        """Convenience property to access DuckDB config."""
+        return self.database.duckdb
+
+    @property
+    def bigquery(self) -> Optional[BigQueryConfig]:
+        """Convenience property to access BigQuery config."""
+        return self.database.bigquery
 
     @classmethod
     def from_file(cls, config_path: Path) -> "FinopsConfig":
@@ -113,14 +122,12 @@ class FinopsConfig:
 
         # Extract global config
         staging_dir = config_data.get("staging_dir", "./staging")
-        state_db = config_data.get("state_db", "./finops_state.db")
         parquet_dir = config_data.get("parquet_dir", "./data/parquet")
 
         return cls(
             aws=aws_config,
             database=database_config,
             staging_dir=staging_dir,
-            state_db=state_db,
             parquet_dir=parquet_dir
         )
 
