@@ -28,8 +28,11 @@ class StateChecker:
             try:
                 return self._query_bigquery(vendor)
             except Exception as e:
-                print(f"Warning: Failed to query BigQuery: {e}")
-                print("Falling back to local DuckDB...")
+                # Only show warning if it's not a "table not found" error
+                error_msg = str(e).lower()
+                if "not found" not in error_msg and "does not exist" not in error_msg:
+                    print(f"Warning: Failed to query BigQuery: {e}")
+                    print("Falling back to local DuckDB...")
 
         # Fall back to DuckDB
         if self.duckdb_path:
@@ -62,23 +65,19 @@ class StateChecker:
             ORDER BY billing_period DESC
         """
 
-        try:
-            query_job = client.query(query)
-            results = query_job.result()
+        query_job = client.query(query)
+        results = query_job.result()
 
-            # Build map: billing_period -> execution_id
-            # If multiple execution_ids exist for a period, use the most recent one
-            period_map = {}
-            for row in results:
-                billing_period = row['billing_period']
-                execution_id = row['execution_id']
-                if billing_period not in period_map:
-                    period_map[billing_period] = execution_id
+        # Build map: billing_period -> execution_id
+        # If multiple execution_ids exist for a period, use the most recent one
+        period_map = {}
+        for row in results:
+            billing_period = row['billing_period']
+            execution_id = row['execution_id']
+            if billing_period not in period_map:
+                period_map[billing_period] = execution_id
 
-            return period_map
-
-        except Exception as e:
-            raise Exception(f"Failed to query BigQuery: {e}")
+        return period_map
 
     def _query_duckdb(self, vendor: str) -> Dict[str, str]:
         """Query DuckDB for loaded execution_ids."""
