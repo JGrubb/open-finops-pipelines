@@ -244,6 +244,26 @@ class DuckDBLoader:
                 'error': error_msg
             }
 
+    def _check_execution_loaded(self, table_name: str, billing_period: str, execution_id: str) -> bool:
+        """Check if an execution_id is already loaded for a billing period."""
+        if not self.connection:
+            raise RuntimeError("Connection not established. Use within context manager.")
+
+        try:
+            query = f"""
+                SELECT COUNT(*) FROM {table_name}
+                WHERE execution_id = ?
+                AND PRINTF('%04d-%02d',
+                           EXTRACT(YEAR FROM bill_billing_period_start_date),
+                           EXTRACT(MONTH FROM bill_billing_period_start_date)
+                    ) = ?
+            """
+            result = self.connection.execute(query, [execution_id, billing_period]).fetchone()
+            return result[0] > 0 if result else False
+        except Exception:
+            # Table doesn't exist or other error
+            return False
+
     def load_billing_data_from_manifests(
         self,
         manifests: List,
@@ -270,7 +290,22 @@ class DuckDBLoader:
             print("No manifests provided to load.")
             return {'total_executions': 0, 'loaded_executions': 0, 'failed_executions': 0, 'total_rows': 0}
 
-        print(f"Found {len(manifests)} execution(s) to load")
+        print(f"Found {len(manifests)} execution(s) to check")
+        print()
+
+        # Filter out already-loaded manifests
+        manifests_to_load = []
+        for manifest in manifests:
+            if self._check_execution_loaded(table_name, manifest.billing_period, manifest.id):
+                print(f"  Skipping {manifest.billing_period} ({manifest.id[:8]}...) - already loaded")
+            else:
+                manifests_to_load.append(manifest)
+
+        if not manifests_to_load:
+            print("\nAll manifests already loaded in DuckDB")
+            return {'total_executions': len(manifests), 'loaded_executions': 0, 'failed_executions': 0, 'total_rows': 0, 'results': []}
+
+        print(f"\nLoading {len(manifests_to_load)} new execution(s)")
         print()
 
         # Load each manifest
@@ -279,8 +314,8 @@ class DuckDBLoader:
         failed_count = 0
         results = []
 
-        for i, manifest in enumerate(manifests, 1):
-            print(f"[{i}/{len(manifests)}] ", end="")
+        for i, manifest in enumerate(manifests_to_load, 1):
+            print(f"[{i}/{len(manifests_to_load)}] ", end="")
 
             result = self.load_execution_from_staging(
                 manifest.billing_period,
