@@ -1,6 +1,3 @@
-from pathlib import Path
-
-
 def setup_aws_parser(subparsers):
     """Set up the AWS subcommand parser."""
     aws_parser = subparsers.add_parser(
@@ -41,20 +38,6 @@ def setup_aws_parser(subparsers):
         help="AWS region (default: us-east-1)"
     )
     discover_parser.set_defaults(func=discover_manifests)
-
-    # extract-manifests command
-    extract_parser = aws_subparsers.add_parser(
-        "extract-manifests",
-        help="List available CUR manifest files"
-    )
-    extract_parser.set_defaults(func=extract_manifests)
-
-    # show-state command
-    state_parser = aws_subparsers.add_parser(
-        "show-state",
-        help="Show previous pipeline executions and their state"
-    )
-    state_parser.set_defaults(func=show_state)
 
     # extract-billing command
     extract_billing_parser = aws_subparsers.add_parser(
@@ -164,69 +147,44 @@ def setup_aws_parser(subparsers):
 
 
 def discover_manifests(config_path, args):
-    """Discover AWS CUR manifests from S3."""
+    """Diagnostic tool: Show what manifests are available vs already loaded."""
     from finops.config import FinopsConfig
     from finops.services.manifest_discovery import ManifestDiscoveryService
     from finops.services.state_checker import StateChecker
 
-    print("🔍 Discovering AWS CUR manifests...")
+    print("🔍 Diagnostic: Checking manifest status...")
 
     try:
-        # Convert args to dict for config loading
-        cli_args = {
+        # Build CLI args for config override
+        cli_args = {k: v for k, v in {
             "bucket": args.bucket,
             "prefix": args.prefix,
             "export_name": args.export_name,
             "cur_version": args.cur_version,
             "region": args.region
-        }
+        }.items() if v is not None}
 
-        # Load configuration with CLI precedence
+        # Load and validate config
         config = FinopsConfig.from_cli_args(config_path, cli_args)
         config.validate()
 
-        print(f"Bucket: {config.aws.bucket}")
-        print(f"Prefix: {config.aws.prefix}")
-        print(f"Export: {config.aws.export_name}")
-        print(f"Version: {config.aws.cur_version}")
-        print()
+        print(f"S3 Location: s3://{config.aws.bucket}/{config.aws.prefix}")
+        print(f"Export: {config.aws.export_name} (CUR {config.aws.cur_version})\n")
 
-        # Initialize state checker to query destination databases
+        # Check state and discover manifests
         state_checker = StateChecker(config)
-
-        # Discover manifests
         discovery_service = ManifestDiscoveryService(config.aws, state_checker)
         manifests = discovery_service.discover_manifests()
 
-        # Display results
-        summary = discovery_service.get_manifest_summary(manifests)
-        print(summary)
+        # Show summary
+        print(discovery_service.get_manifest_summary(manifests))
 
         if manifests:
-            print(f"\nNext step: Use 'finops aws extract-billing' to download CSV files")
+            print(f"\n💡 To process these manifests: finops aws extract-billing")
 
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"❌ Error: {e}")
         exit(1)
-
-
-def extract_manifests(config, args):
-    """Extract manifest files (deprecated)."""
-    print("This command has been deprecated.")
-    print("Manifests are now automatically discovered from S3 when running:")
-    print("  finops aws extract-billing")
-    print("  finops aws load-billing-local")
-    print("\nNo separate manifest extraction step is needed.")
-
-
-def show_state(config_path, args):
-    """Show pipeline execution state (deprecated)."""
-    print("This command has been deprecated.")
-    print("\nThe pipeline now uses filesystem and destination databases for state.")
-    print("\nTo check state:")
-    print("  - Staging directory shows what's downloaded")
-    print("  - Run 'finops aws discover-manifests' to see what's loaded vs available in S3")
-    print("  - Query DuckDB or BigQuery directly to see loaded data")
 
 
 def extract_billing(config_path, args):
@@ -330,6 +288,10 @@ def load_billing_local(config_path, args):
         config = FinopsConfig.from_cli_args(config_path, {})
 
         # Create data directory if needed
+        if not config.duckdb:
+            raise ValueError("DuckDB configuration is missing")
+
+        from pathlib import Path
         duckdb_path = Path(config.duckdb.database_path)
         duckdb_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -374,7 +336,8 @@ def load_billing_local(config_path, args):
             print()
             if stats['loaded_executions'] > 0:
                 print("🎉 Loading completed successfully!")
-                print(f"Database location: {config.duckdb.database_path}")
+                if config.duckdb:
+                    print(f"Database location: {config.duckdb.database_path}")
 
                 # Show table info
                 table_info = loader.get_table_info("aws_billing_data")
@@ -387,7 +350,8 @@ def load_billing_local(config_path, args):
                         print(f"  Date range: {table_info['date_range']['min_date']} to {table_info['date_range']['max_date']}")
 
                 print(f"\nNext steps:")
-                print(f"  • Query data: duckdb {config.duckdb.database_path}")
+                if config.duckdb:
+                    print(f"  • Query data: duckdb {config.duckdb.database_path}")
                 print(f"  • Export to Parquet: finops aws export-parquet")
                 print(f"  • Load to BigQuery: finops aws load-billing-remote")
             else:
@@ -414,6 +378,10 @@ def export_parquet(config_path, args):
 
         # Override parquet directory if specified
         parquet_dir = args.output_dir if args.output_dir else config.parquet_dir
+
+        # Validate DuckDB configuration
+        if not config.duckdb:
+            raise ValueError("DuckDB configuration is missing")
 
         # Validate date format if provided
         if args.start_date and not re.match(r'^\d{4}-\d{2}$', args.start_date):
@@ -578,18 +546,24 @@ def load_billing_remote(config_path, args):
 
 def run_pipeline(config_path, args):
     """Run the complete meta-pipeline."""
+    from pathlib import Path
     from finops.config import FinopsConfig
-    from finops.services.pipeline_orchestrator import PipelineOrchestrator
+    from finops.services.manifest_discovery import ManifestDiscoveryService
+    from finops.services.billing_extractor import BillingExtractorService
+    from finops.services.duckdb_loader import DuckDBLoader
+    from finops.services.parquet_exporter import ParquetExporter
+    from finops.services.bigquery_loader import BigQueryLoader
+    from finops.services.state_checker import StateChecker
     import re
 
-    print("🚀 Running complete AWS billing pipeline...")
+    print("🚀 Running complete AWS billing pipeline...\n")
 
     try:
-        # Load configuration
+        # Load and validate configuration
         config = FinopsConfig.from_cli_args(config_path, {})
         config.validate()
 
-        # Validate date format if provided
+        # Validate date format
         if args.start_date and not re.match(r'^\d{4}-\d{2}$', args.start_date):
             print("❌ Error: start-date must be in YYYY-MM format")
             return
@@ -599,45 +573,110 @@ def run_pipeline(config_path, args):
 
         # Show configuration
         print(f"📋 Configuration:")
-        print(f"  Bucket: {config.aws.bucket}")
-        print(f"  Export: {config.aws.export_name}")
-        print(f"  Version: {config.aws.cur_version}")
+        print(f"  S3: s3://{config.aws.bucket}/{config.aws.prefix}")
+        print(f"  Export: {config.aws.export_name} (CUR {config.aws.cur_version})")
         if args.start_date or args.end_date:
-            date_range = f"{args.start_date or 'earliest'} to {args.end_date or 'latest'}"
-            print(f"  Date range: {date_range}")
+            print(f"  Date range: {args.start_date or 'earliest'} to {args.end_date or 'latest'}")
         if args.dry_run:
             print(f"  Mode: DRY RUN")
         print()
 
-        # Initialize and run pipeline
-        orchestrator = PipelineOrchestrator(config)
+        # Step 1: Discover manifests
+        print("📍 Step 1/5: Discovering manifests...")
+        # For full pipeline, don't check state - process everything from S3
+        discovery_service = ManifestDiscoveryService(config.aws, state_checker=None)
+        manifests = discovery_service.discover_manifests()
 
-        results = orchestrator.run_full_pipeline(
-            start_date=args.start_date,
-            end_date=args.end_date,
-            dry_run=args.dry_run
-        )
+        # Filter by date range
+        if args.start_date or args.end_date:
+            filtered = []
+            for m in manifests:
+                if args.start_date and m.billing_period < args.start_date:
+                    continue
+                if args.end_date and m.billing_period > args.end_date:
+                    continue
+                filtered.append(m)
+            manifests = filtered
 
-        # Show results
+        if not manifests:
+            print("  No manifests to process")
+            return
+
+        billing_periods = sorted(list(set(m.billing_period for m in manifests)))
+        print(f"  Found {len(manifests)} manifest(s) covering {len(billing_periods)} period(s)")
+        print(f"  Periods: {', '.join(billing_periods)}")
+
         if args.dry_run:
-            print("\n📋 Dry Run Summary:")
-            print(f"  Manifests to process: {results['manifests_to_process']}")
-            print(f"  Billing periods: {', '.join(results['billing_periods']) if results['billing_periods'] else 'None'}")
-        else:
-            print(f"\n🎉 Pipeline completed!")
-            print(f"  Run ID: {results['run_id']}")
-            print(f"  Manifests processed: {results['manifests_processed']}")
-            print(f"  Billing periods: {', '.join(results['billing_periods_processed']) if results['billing_periods_processed'] else 'None'}")
+            print("\n✅ Dry run complete (no data processed)")
+            return
 
-            if results['manifests_processed'] > 0:
-                print(f"\n📊 Data loaded successfully!")
-                if config.database.duckdb:
-                    print(f"  • DuckDB: {config.database.duckdb.database_path}")
-                print(f"  • Parquet: {config.parquet_dir}")
-                if config.database.remote == "bigquery" and config.database.bigquery:
-                    print(f"  • BigQuery: {config.database.bigquery.project_id}.{config.database.bigquery.dataset_id}.{config.database.bigquery.table_id}")
+        # Step 2: Extract billing files
+        print(f"\n💾 Step 2/5: Extracting billing files...")
+        extractor = BillingExtractorService(config.aws)
+        extract_stats = extractor.extract_billing_files(manifests, config.staging_dir)
+        print(f"  Files downloaded: {extract_stats['files_downloaded']}")
+        if extract_stats['errors'] > 0:
+            print(f"  ⚠️  Errors: {extract_stats['errors']}")
+
+        # Step 3: Load to DuckDB
+        print(f"\n🗄️  Step 3/5: Loading to DuckDB...")
+        if not config.duckdb:
+            raise ValueError("DuckDB configuration is missing")
+
+        duckdb_path = Path(config.duckdb.database_path)
+        duckdb_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with DuckDBLoader(config.duckdb.database_path) as loader:
+            load_stats = loader.load_billing_data_from_manifests(
+                manifests=manifests,
+                staging_dir=config.staging_dir,
+                table_name="aws_billing_data"
+            )
+            print(f"  Loaded: {load_stats['loaded_executions']} execution(s)")
+            print(f"  Total rows: {load_stats['total_rows']:,}")
+
+        # Step 4: Export to Parquet
+        print(f"\n📁 Step 4/5: Exporting to Parquet...")
+        with ParquetExporter(config.duckdb.database_path, config.parquet_dir, "aws_billing_data") as exporter:
+            export_stats = exporter.export_billing_periods(
+                billing_periods,
+                vendor="aws",
+                overwrite=False,
+                compression="snappy"
+            )
+            exported = sum(1 for s in export_stats.values() if s == "exported")
+            skipped = sum(1 for s in export_stats.values() if s == "skipped")
+            print(f"  Exported: {exported}, Skipped: {skipped}")
+
+        # Step 5: Load to BigQuery (optional)
+        if config.bigquery:
+            print(f"\n☁️  Step 5/5: Loading to BigQuery...")
+            bq_loader = BigQueryLoader(config.bigquery, config.parquet_dir)
+            bq_stats = bq_loader.load_billing_periods(
+                billing_periods,
+                vendor="aws",
+                overwrite=False
+            )
+            loaded = sum(1 for s in bq_stats.values() if s == "loaded")
+            print(f"  Loaded: {loaded} period(s)")
+        else:
+            print(f"\n⏭️  Step 5/5: Skipping BigQuery (not configured)")
+
+        # Summary
+        print(f"\n🎉 Pipeline completed successfully!")
+        print(f"\n📊 Summary:")
+        print(f"  Manifests: {len(manifests)}")
+        print(f"  Billing periods: {', '.join(billing_periods)}")
+        print(f"  Rows loaded: {load_stats['total_rows']:,}")
+        if config.duckdb:
+            print(f"\n📁 Data locations:")
+            print(f"  • DuckDB: {config.duckdb.database_path}")
+            print(f"  • Parquet: {config.parquet_dir}/")
+        if config.bigquery:
+            print(f"  • BigQuery: {config.bigquery.project_id}.{config.bigquery.dataset_id}.{config.bigquery.table_id}")
 
     except Exception as e:
-        print(f"❌ Pipeline failed: {str(e)}")
-        print("\nTo retry: simply rerun the same command")
+        print(f"\n❌ Pipeline failed: {e}")
+        import traceback
+        traceback.print_exc()
         exit(1)
