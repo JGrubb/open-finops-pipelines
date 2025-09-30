@@ -218,7 +218,7 @@ class DuckDBLoader:
 
             for csv_path in csv_files:
                 rows = self.load_csv_file(csv_path, table_name, column_mapping, columns, execution_id)
-                total_rows += rows
+                total_rows = rows
                 loaded_files += 1
 
             print(f"✓ Completed: {billing_period} - {total_rows:,} rows from {loaded_files} files")
