@@ -87,32 +87,31 @@ class FinopsConfig:
 
         # Extract database config
         db_data = config_data.get("database", {})
-        backend = db_data.get("backend", "duckdb")
+        backend = db_data.get("backend", db_data.get("local", "duckdb"))
 
         duckdb_config = None
         bigquery_config = None
 
-        if backend == "duckdb":
-            duckdb_data = db_data.get("duckdb", {})
+        # Always load DuckDB config if present (used for local operations)
+        duckdb_data = db_data.get("duckdb", {})
+        if duckdb_data or backend == "duckdb":
             duckdb_config = DuckDBConfig(
                 database_path=duckdb_data.get("database_path", "./data/finops.duckdb")
             )
-        elif backend == "bigquery":
-            bq_data = db_data.get("bigquery", {})
-            if not bq_data:
-                raise ValueError("Missing [database.bigquery] section for BigQuery backend")
 
+        # Always load BigQuery config if present (used for remote operations)
+        bq_data = db_data.get("bigquery", {})
+        if bq_data:
             required_bq_fields = ["project_id", "dataset_id", "table_id", "credentials_path"]
-            for field in required_bq_fields:
-                if field not in bq_data:
-                    raise ValueError(f"Missing required BigQuery configuration: {field}")
+            missing_fields = [f for f in required_bq_fields if f not in bq_data]
 
-            bigquery_config = BigQueryConfig(
-                project_id=bq_data["project_id"],
-                dataset_id=bq_data["dataset_id"],
-                table_id=bq_data["table_id"],
-                credentials_path=bq_data["credentials_path"]
-            )
+            if not missing_fields:
+                bigquery_config = BigQueryConfig(
+                    project_id=bq_data["project_id"],
+                    dataset_id=bq_data["dataset_id"],
+                    table_id=bq_data["table_id"],
+                    credentials_path=bq_data["credentials_path"]
+                )
 
         database_config = DatabaseConfig(
             backend=backend,
