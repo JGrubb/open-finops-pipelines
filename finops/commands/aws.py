@@ -360,7 +360,8 @@ def extract_billing(config_path, args):
 def load_billing_local(config_path, args):
     """Load billing data to local DuckDB."""
     from finops.config import FinopsConfig
-    from finops.services.state_db import StateDB
+    from finops.services.manifest_discovery import ManifestDiscoveryService
+    from finops.services.state_checker import StateChecker
     from finops.services.duckdb_loader import DuckDBLoader
     from pathlib import Path
 
@@ -370,36 +371,52 @@ def load_billing_local(config_path, args):
         # Load configuration
         config = FinopsConfig.from_cli_args(config_path, {})
 
-        # Verify local database is configured for DuckDB
-        if config.database.local != "duckdb":
-            print(f"❌ Error: load-billing-local requires local database to be 'duckdb', got '{config.database.local}'")
-            return
-
-        # Initialize state database
-        state_db = StateDB(Path(config.state_db))
-
         # Create data directory if needed
-        duckdb_path = Path(config.database.duckdb.database_path)
+        duckdb_path = Path(config.duckdb.database_path)
         duckdb_path.parent.mkdir(parents=True, exist_ok=True)
 
-        print(f"DuckDB database: {config.database.duckdb.database_path}")
+        print(f"DuckDB database: {config.duckdb.database_path}")
         print(f"Staging directory: {config.staging_dir}")
         print()
 
+        # Discover manifests (filters out already loaded)
+        print("Discovering manifests...")
+        state_checker = StateChecker(config)
+        discovery_service = ManifestDiscoveryService(config.aws, state_checker)
+        manifests = discovery_service.discover_manifests()
+
+        # Filter by date range if specified
+        start_date = getattr(args, 'start_date', None)
+        end_date = getattr(args, 'end_date', None)
+
+        if start_date or end_date:
+            filtered_manifests = []
+            for manifest in manifests:
+                billing_period = manifest.billing_period
+                if start_date and billing_period < start_date:
+                    continue
+                if end_date and billing_period > end_date:
+                    continue
+                filtered_manifests.append(manifest)
+            manifests = filtered_manifests
+
+        if not manifests:
+            print("No manifests to load")
+            return
+
         # Load data using DuckDB loader
-        with DuckDBLoader(config.database.duckdb.database_path, state_db) as loader:
-            stats = loader.load_billing_data(
+        with DuckDBLoader(config.duckdb.database_path) as loader:
+            stats = loader.load_billing_data_from_manifests(
+                manifests=manifests,
                 staging_dir=config.staging_dir,
-                start_date=getattr(args, 'start_date', None),
-                end_date=getattr(args, 'end_date', None),
                 table_name="aws_billing_data"
             )
 
             # Display final results
             print()
-            if stats['loaded_manifests'] > 0:
+            if stats['loaded_executions'] > 0:
                 print("🎉 Loading completed successfully!")
-                print(f"Database location: {config.database.duckdb.database_path}")
+                print(f"Database location: {config.duckdb.database_path}")
 
                 # Show table info
                 table_info = loader.get_table_info("aws_billing_data")
@@ -412,12 +429,12 @@ def load_billing_local(config_path, args):
                         print(f"  Date range: {table_info['date_range']['min_date']} to {table_info['date_range']['max_date']}")
 
                 print(f"\nNext steps:")
-                print(f"  • Query data: duckdb {config.database.duckdb.database_path}")
+                print(f"  • Query data: duckdb {config.duckdb.database_path}")
                 print(f"  • Export to Parquet: finops aws export-parquet")
                 print(f"  • Load to BigQuery: finops aws load-billing-remote")
             else:
-                print("No data was loaded. Check that you have staged manifests.")
-                print("Run 'finops aws extract-billing' to stage CSV files first.")
+                print("No data was loaded.")
+                print("Run 'finops aws extract-billing' to download CSV files first.")
 
     except Exception as e:
         print(f"Error: {e}")
@@ -428,26 +445,17 @@ def export_parquet(config_path, args):
     """Export to Parquet format."""
     from pathlib import Path
     from finops.config import FinopsConfig
-    from finops.services.state_db import StateDB
     from finops.services.parquet_exporter import ParquetExporter
     import re
 
     print("📁 Exporting to Parquet format...")
 
     try:
-        # Load configuration (skip AWS validation since export only needs local DuckDB)
+        # Load configuration
         config = FinopsConfig.from_cli_args(Path(config_path), {})
-
-        # Verify local database is configured for DuckDB
-        if config.database.local != "duckdb":
-            print(f"❌ Error: export-parquet requires local database to be 'duckdb', got '{config.database.local}'")
-            return
 
         # Override parquet directory if specified
         parquet_dir = args.output_dir if args.output_dir else config.parquet_dir
-
-        # Initialize state database
-        state_db = StateDB(Path(config.state_db))
 
         # Validate date format if provided
         if args.start_date and not re.match(r'^\d{4}-\d{2}$', args.start_date):
@@ -458,7 +466,7 @@ def export_parquet(config_path, args):
             return
 
         # Export using ParquetExporter service
-        with ParquetExporter(config.database.duckdb.database_path, state_db, parquet_dir, "aws_billing_data") as exporter:
+        with ParquetExporter(config.duckdb.database_path, parquet_dir, "aws_billing_data") as exporter:
             # Validate DuckDB table exists
             if not exporter.validate_table_exists():
                 print("❌ Error: aws_billing_data table not found or empty in DuckDB")
@@ -529,8 +537,6 @@ def load_billing_remote(config_path, args):
     """Load billing data to remote warehouse."""
     from finops.config import FinopsConfig
     from finops.services.bigquery_loader import BigQueryLoader
-    from finops.services.state_db import StateDB
-    from pathlib import Path
 
     print("☁️  Loading billing data to remote warehouse...")
 
@@ -538,22 +544,17 @@ def load_billing_remote(config_path, args):
         # Load configuration
         config = FinopsConfig.from_file(config_path)
 
-        # Validate BigQuery remote backend is configured
-        if config.database.remote != "bigquery":
-            raise ValueError(f"Remote loading requires BigQuery remote backend, but remote is set to '{config.database.remote}'")
-
-        if not config.database.bigquery:
+        # Validate BigQuery is configured
+        if not config.bigquery:
             raise ValueError("BigQuery configuration is missing")
 
-        print(f"Project: {config.database.bigquery.project_id}")
-        print(f"Dataset: {config.database.bigquery.dataset_id}")
-        print(f"Table: {config.database.bigquery.table_id}")
+        print(f"Project: {config.bigquery.project_id}")
+        print(f"Dataset: {config.bigquery.dataset_id}")
+        print(f"Table: {config.bigquery.table_id}")
         print()
 
-        # Initialize state database and BigQuery loader
-        state_db = StateDB(Path(config.state_db))
-
-        loader = BigQueryLoader(state_db, config.database.bigquery, config.parquet_dir)
+        # Initialize BigQuery loader
+        loader = BigQueryLoader(config.bigquery, config.parquet_dir)
 
         # Validate connections
         if not loader.validate_bigquery_connection():
@@ -594,7 +595,6 @@ def load_billing_remote(config_path, args):
         )
 
         # Display summary
-        summary = loader.get_load_summary()
         loaded_count = len([r for r in results.values() if r == "loaded"])
         skipped_count = len([r for r in results.values() if r == "skipped"])
         failed_count = len([r for r in results.values() if r == "failed"])
@@ -604,10 +604,6 @@ def load_billing_remote(config_path, args):
         print(f"  Loaded: {loaded_count}")
         print(f"  Skipped: {skipped_count}")
         print(f"  Failed: {failed_count}")
-        print()
-        print("📈 Total BigQuery Operations:")
-        for state, count in summary.items():
-            print(f"  {state.title()}: {count}")
 
         if failed_count > 0:
             print()
