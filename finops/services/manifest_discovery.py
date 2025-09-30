@@ -7,14 +7,16 @@ from botocore.exceptions import ClientError, NoCredentialsError
 from finops.models.manifest import CURManifest
 from finops.config import AWSConfig
 from finops.services.state_db import StateDB
+from finops.services.state_checker import StateChecker
 
 
 class ManifestDiscoveryService:
     """Service for discovering AWS CUR manifest files."""
 
-    def __init__(self, aws_config: AWSConfig, state_db: StateDB):
+    def __init__(self, aws_config: AWSConfig, state_db: StateDB, state_checker: Optional[StateChecker] = None):
         self.aws_config = aws_config
         self.state_db = state_db
+        self.state_checker = state_checker
         self._s3_client = None
 
     @property
@@ -39,6 +41,24 @@ class ManifestDiscoveryService:
             manifests = self._discover_v2_manifests()
         else:
             raise ValueError(f"Unsupported CUR version: {version}")
+
+        # Filter out already-loaded manifests using StateChecker
+        if self.state_checker:
+            loaded_execution_ids = self.state_checker.get_loaded_execution_ids("aws")
+            print(f"Found {len(loaded_execution_ids)} billing periods already loaded in destination database")
+
+            filtered_manifests = []
+            for manifest in manifests:
+                billing_period = manifest.billing_period
+                execution_id = manifest.id
+
+                if loaded_execution_ids.get(billing_period) == execution_id:
+                    print(f"  Skipping {billing_period} (execution_id {execution_id} already loaded)")
+                else:
+                    filtered_manifests.append(manifest)
+
+            print(f"Found {len(filtered_manifests)} new manifests to process")
+            manifests = filtered_manifests
 
         # Persist discovered manifests to state database
         for manifest in manifests:
