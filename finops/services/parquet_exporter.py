@@ -23,36 +23,37 @@ class ParquetExporter:
         if hasattr(self, 'conn'):
             self.conn.close()
 
-    def export_manifests(
+    def export_billing_data_by_execution(
         self,
         manifests: List,
         vendor: str = "aws",
         overwrite: bool = False,
         compression: str = "snappy"
     ) -> Dict[str, str]:
-        """Export data for multiple manifests to Parquet files.
+        """Export billing data for multiple executions to Parquet files.
 
+        Each manifest represents a unique execution of billing data.
         Filename format: {billing_period}_{execution_id}_{vendor}_billing.parquet
 
-        Returns dict mapping manifest_key (billing_period:execution_id) to export status.
+        Returns dict mapping execution_key (billing_period:execution_id) to export status.
         """
         results = {}
 
         for manifest in manifests:
-            manifest_key = f"{manifest.billing_period}:{manifest.id}"
+            execution_key = f"{manifest.billing_period}:{manifest.id}"
             try:
-                result = self._export_manifest(
+                result = self._export_single_execution(
                     manifest.billing_period, manifest.id, vendor, overwrite, compression
                 )
-                results[manifest_key] = result
+                results[execution_key] = result
                 print(f"✓ {manifest.billing_period} ({manifest.id[:8]}...): {result}")
             except Exception as e:
-                results[manifest_key] = "failed"
+                results[execution_key] = "failed"
                 print(f"✗ {manifest.billing_period} ({manifest.id[:8]}...): failed - {str(e)}")
 
         return results
 
-    def _export_manifest(
+    def _export_single_execution(
         self,
         billing_period: str,
         execution_id: str,
@@ -60,7 +61,7 @@ class ParquetExporter:
         overwrite: bool,
         compression: str
     ) -> str:
-        """Export a single manifest's data to Parquet."""
+        """Export billing data for a single execution to Parquet."""
         filename = f"{billing_period}_{execution_id}_{vendor}_billing.parquet"
         file_path = self.parquet_dir / filename
 

@@ -635,10 +635,10 @@ def run_pipeline(config_path, args):
             print(f"  Loaded: {load_stats['loaded_executions']} execution(s)")
             print(f"  Total rows: {load_stats['total_rows']:,}")
 
-        # Step 4: Export to Parquet (by manifest with execution_id)
+        # Step 4: Export to Parquet (by execution with execution_id)
         print(f"\n📁 Step 4/5: Exporting to Parquet...")
         with ParquetExporter(config.duckdb.database_path, config.parquet_dir, "aws_billing_data") as exporter:
-            export_stats = exporter.export_manifests(
+            export_stats = exporter.export_billing_data_by_execution(
                 manifests,
                 vendor="aws",
                 overwrite=False,
@@ -652,7 +652,7 @@ def run_pipeline(config_path, args):
         if config.bigquery:
             print(f"\n☁️  Step 5/5: Loading to BigQuery...")
             bq_loader = BigQueryLoader(config.bigquery, config.parquet_dir)
-            bq_stats = bq_loader.load_manifests(
+            bq_stats = bq_loader.load_billing_data_by_execution(
                 manifests,
                 vendor="aws",
                 overwrite=False

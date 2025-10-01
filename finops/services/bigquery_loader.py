@@ -25,17 +25,18 @@ class BigQueryLoader:
         # Construct table reference
         self.table_ref = f"{bigquery_config.project_id}.{bigquery_config.dataset_id}.{bigquery_config.table_id}"
 
-    def load_manifests(
+    def load_billing_data_by_execution(
         self,
         manifests: List,
         vendor: str = "aws",
         overwrite: bool = False
     ) -> Dict[str, str]:
-        """Load manifests to BigQuery from Parquet files.
+        """Load billing data to BigQuery from Parquet files.
 
-        Only loads manifests with new execution_ids not already in BigQuery.
+        Each manifest represents a unique execution of billing data.
+        Only loads executions with new execution_ids not already in BigQuery.
 
-        Returns dict mapping manifest_key (billing_period:execution_id) to load status.
+        Returns dict mapping execution_key (billing_period:execution_id) to load status.
         """
         # Ensure table exists first
         self._ensure_table_exists()
@@ -44,34 +45,34 @@ class BigQueryLoader:
         loaded_execution_ids = self._get_loaded_execution_ids()
 
         results = {}
-        manifests_to_load = []
+        executions_to_load = []
 
         for manifest in manifests:
-            manifest_key = f"{manifest.billing_period}:{manifest.id}"
+            execution_key = f"{manifest.billing_period}:{manifest.id}"
 
             # Check if this execution_id is already loaded
             if not overwrite and loaded_execution_ids.get(manifest.billing_period) == manifest.id:
-                results[manifest_key] = "skipped"
+                results[execution_key] = "skipped"
                 print(f"  Skipping {manifest.billing_period} ({manifest.id[:8]}...) - already loaded")
             else:
-                manifests_to_load.append(manifest)
+                executions_to_load.append(manifest)
 
-        if not manifests_to_load:
-            print("  All manifests already loaded in BigQuery")
+        if not executions_to_load:
+            print("  All billing data already loaded in BigQuery")
             return results
 
-        print(f"  Loading {len(manifests_to_load)} new manifest(s)\n")
+        print(f"  Loading {len(executions_to_load)} new execution(s)\n")
 
-        for manifest in manifests_to_load:
-            manifest_key = f"{manifest.billing_period}:{manifest.id}"
+        for manifest in executions_to_load:
+            execution_key = f"{manifest.billing_period}:{manifest.id}"
             try:
-                result = self._load_manifest(
+                result = self._load_single_execution(
                     manifest.billing_period, manifest.id, vendor, overwrite
                 )
-                results[manifest_key] = result
+                results[execution_key] = result
                 print(f"✓ {manifest.billing_period} ({manifest.id[:8]}...): {result}")
             except Exception as e:
-                results[manifest_key] = "failed"
+                results[execution_key] = "failed"
                 print(f"✗ {manifest.billing_period} ({manifest.id[:8]}...): failed - {str(e)}")
 
         return results
@@ -107,29 +108,29 @@ class BigQueryLoader:
             # Table doesn't exist or query failed - return empty
             return {}
 
-    def _load_manifest(
+    def _load_single_execution(
         self,
         billing_period: str,
         execution_id: str,
         vendor: str,
         overwrite: bool
     ) -> str:
-        """Load a single manifest's data to BigQuery from Parquet file."""
-        # Check if Parquet file exists for this manifest
+        """Load billing data for a single execution to BigQuery from Parquet file."""
+        # Check if Parquet file exists for this execution
         parquet_file = self.parquet_dir / f"{billing_period}_{execution_id}_{vendor}_billing.parquet"
         if not parquet_file.exists():
             raise ValueError(f"Parquet file not found: {parquet_file}")
 
         try:
             # Load to BigQuery from Parquet file with DELETE + APPEND
-            self._load_manifest_to_bigquery(parquet_file, billing_period, execution_id)
+            self._load_execution_to_bigquery(parquet_file, billing_period, execution_id)
             return "loaded"
 
         except Exception as e:
             raise
 
-    def _load_manifest_to_bigquery(self, parquet_file: Path, billing_period: str, execution_id: str) -> None:
-        """Load a manifest's Parquet file to BigQuery, replacing data for that execution_id."""
+    def _load_execution_to_bigquery(self, parquet_file: Path, billing_period: str, execution_id: str) -> None:
+        """Load billing data for an execution to BigQuery, replacing data for that execution_id."""
         # Convert billing period to timestamp
         billing_timestamp = datetime.strptime(f"{billing_period}-01", "%Y-%m-%d")
 
