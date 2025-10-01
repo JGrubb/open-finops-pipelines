@@ -23,6 +23,102 @@ class ParquetExporter:
         if hasattr(self, 'conn'):
             self.conn.close()
 
+    def export_manifests(
+        self,
+        manifests: List,
+        vendor: str = "aws",
+        overwrite: bool = False,
+        compression: str = "snappy"
+    ) -> Dict[str, str]:
+        """Export data for multiple manifests to Parquet files.
+
+        Filename format: {billing_period}_{execution_id}_{vendor}_billing.parquet
+
+        Returns dict mapping manifest_key (billing_period:execution_id) to export status.
+        """
+        results = {}
+
+        for manifest in manifests:
+            manifest_key = f"{manifest.billing_period}:{manifest.id}"
+            try:
+                result = self._export_manifest(
+                    manifest.billing_period, manifest.id, vendor, overwrite, compression
+                )
+                results[manifest_key] = result
+                print(f"✓ {manifest.billing_period} ({manifest.id[:8]}...): {result}")
+            except Exception as e:
+                results[manifest_key] = "failed"
+                print(f"✗ {manifest.billing_period} ({manifest.id[:8]}...): failed - {str(e)}")
+
+        return results
+
+    def _export_manifest(
+        self,
+        billing_period: str,
+        execution_id: str,
+        vendor: str,
+        overwrite: bool,
+        compression: str
+    ) -> str:
+        """Export a single manifest's data to Parquet."""
+        filename = f"{billing_period}_{execution_id}_{vendor}_billing.parquet"
+        file_path = self.parquet_dir / filename
+
+        # Check if export already exists and overwrite is False
+        if file_path.exists() and not overwrite:
+            return "skipped"
+
+        # Check if data exists in DuckDB for this execution_id
+        if not self._has_data_for_execution(billing_period, execution_id):
+            raise ValueError(f"No data found in DuckDB for {billing_period} execution {execution_id}")
+
+        try:
+            # Export to Parquet using DuckDB
+            self._export_execution_to_parquet(billing_period, execution_id, file_path, compression)
+            return "exported"
+
+        except Exception as e:
+            raise
+
+    def _has_data_for_execution(self, billing_period: str, execution_id: str) -> bool:
+        """Check if DuckDB has data for the specified execution_id."""
+        try:
+            year, month = billing_period.split('-')
+            result = self.conn.execute(f"""
+                SELECT COUNT(*)
+                FROM {self.table_name}
+                WHERE execution_id = ?
+                  AND EXTRACT(YEAR FROM bill_billing_period_start_date) = ?
+                  AND EXTRACT(MONTH FROM bill_billing_period_start_date) = ?
+            """, (execution_id, int(year), int(month))).fetchone()
+
+            return result[0] > 0 if result else False
+        except Exception:
+            return False
+
+    def _export_execution_to_parquet(
+        self,
+        billing_period: str,
+        execution_id: str,
+        file_path: Path,
+        compression: str
+    ) -> None:
+        """Export execution data to Parquet file using DuckDB COPY command."""
+        year, month = billing_period.split('-')
+
+        query = f"""
+            COPY (
+                SELECT *
+                FROM {self.table_name}
+                WHERE execution_id = '{execution_id}'
+                  AND EXTRACT(YEAR FROM bill_billing_period_start_date) = {year}
+                  AND EXTRACT(MONTH FROM bill_billing_period_start_date) = {month}
+                ORDER BY line_item_usage_start_date, line_item_usage_account_id, line_item_product_code
+            ) TO '{file_path}' (FORMAT PARQUET, COMPRESSION '{compression}')
+        """
+
+        self.conn.execute(query)
+
     def export_billing_periods(
         self,
         billing_periods: List[str],

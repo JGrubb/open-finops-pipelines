@@ -635,11 +635,11 @@ def run_pipeline(config_path, args):
             print(f"  Loaded: {load_stats['loaded_executions']} execution(s)")
             print(f"  Total rows: {load_stats['total_rows']:,}")
 
-        # Step 4: Export to Parquet
+        # Step 4: Export to Parquet (by manifest with execution_id)
         print(f"\n📁 Step 4/5: Exporting to Parquet...")
         with ParquetExporter(config.duckdb.database_path, config.parquet_dir, "aws_billing_data") as exporter:
-            export_stats = exporter.export_billing_periods(
-                billing_periods,
+            export_stats = exporter.export_manifests(
+                manifests,
                 vendor="aws",
                 overwrite=False,
                 compression="snappy"
@@ -648,17 +648,18 @@ def run_pipeline(config_path, args):
             skipped = sum(1 for s in export_stats.values() if s == "skipped")
             print(f"  Exported: {exported}, Skipped: {skipped}")
 
-        # Step 5: Load to BigQuery (optional)
+        # Step 5: Load to BigQuery (only new execution_ids)
         if config.bigquery:
             print(f"\n☁️  Step 5/5: Loading to BigQuery...")
             bq_loader = BigQueryLoader(config.bigquery, config.parquet_dir)
-            bq_stats = bq_loader.load_billing_periods(
-                billing_periods,
+            bq_stats = bq_loader.load_manifests(
+                manifests,
                 vendor="aws",
                 overwrite=False
             )
             loaded = sum(1 for s in bq_stats.values() if s == "loaded")
-            print(f"  Loaded: {loaded} period(s)")
+            skipped = sum(1 for s in bq_stats.values() if s == "skipped")
+            print(f"  Loaded: {loaded}, Skipped: {skipped}")
         else:
             print(f"\n⏭️  Step 5/5: Skipping BigQuery (not configured)")
 
