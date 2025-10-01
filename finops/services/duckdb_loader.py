@@ -191,22 +191,22 @@ class DuckDBLoader:
             if not staging_path.exists():
                 raise ValueError(f"Staging directory not found: {staging_path}")
 
-            # Delete existing data for this execution_id before loading (idempotent reload)
+            # Delete ALL existing data for this billing period before loading new execution
+            # This replaces old execution_id data with the new one for this period
             if not self.connection:
                 raise RuntimeError("Connection not established. Use within context manager.")
 
             year, month = billing_period.split("-")
             delete_result = self.connection.execute(f"""
                 DELETE FROM {table_name}
-                WHERE execution_id = ?
-                  AND EXTRACT(YEAR FROM bill_billing_period_start_date) = {year}
+                WHERE EXTRACT(YEAR FROM bill_billing_period_start_date) = {year}
                   AND EXTRACT(MONTH FROM bill_billing_period_start_date) = {month}
-            """, [execution_id])
+            """)
             deleted_rows = delete_result.fetchone()
             if deleted_rows and deleted_rows[0] > 0:
-                print(f"  Deleted {deleted_rows[0]:,} existing rows for {billing_period} ({execution_id[:8]}...)")
+                print(f"  Deleted {deleted_rows[0]:,} existing rows for {billing_period}")
             else:
-                print(f"  No existing data found for {billing_period} ({execution_id[:8]}...)")
+                print(f"  No existing data found for {billing_period}")
 
             # Find and load all CSV files in staging directory
             csv_files = list(staging_path.glob("*.csv.gz")) + list(staging_path.glob("*.csv"))
