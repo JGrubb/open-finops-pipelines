@@ -44,8 +44,17 @@ class FinopsConfig:
     """Main configuration for finops CLI."""
     aws: AWSConfig
     database: DatabaseConfig
-    staging_dir: str = "./staging"
-    parquet_dir: str = "./data/parquet"
+    data_dir: str = "./data"
+
+    @property
+    def staging_dir(self) -> str:
+        """Staging directory for CSV files."""
+        return f"{self.data_dir}/staging"
+
+    @property
+    def parquet_dir(self) -> str:
+        """Parquet export directory."""
+        return f"{self.data_dir}/exports"
 
     @property
     def duckdb(self) -> Optional[DuckDBConfig]:
@@ -120,14 +129,12 @@ class FinopsConfig:
         )
 
         # Extract global config
-        staging_dir = config_data.get("staging_dir", "./staging")
-        parquet_dir = config_data.get("parquet_dir", "./data/parquet")
+        data_dir = config_data.get("data_dir", "./data")
 
         return cls(
             aws=aws_config,
             database=database_config,
-            staging_dir=staging_dir,
-            parquet_dir=parquet_dir
+            data_dir=data_dir
         )
 
     @classmethod

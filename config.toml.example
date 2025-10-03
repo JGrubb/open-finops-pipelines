@@ -1,8 +1,8 @@
 # FinOps Pipeline Configuration
 
 # Global settings
-staging_dir = "./data/staging"
-state_db = "./finops_state.db"
+# All pipeline data (staging CSVs, parquet exports, DuckDB) stored under this directory
+data_dir = "./data"
 
 [aws]
 # S3 bucket where CUR data is stored
