@@ -130,22 +130,21 @@ class BigQueryLoader:
             raise
 
     def _load_execution_to_bigquery(self, parquet_file: Path, billing_period: str, execution_id: str) -> None:
-        """Load billing data for an execution to BigQuery, replacing data for that execution_id."""
+        """Load billing data for an execution to BigQuery, replacing data for the billing period."""
         # Convert billing period to timestamp
         billing_timestamp = datetime.strptime(f"{billing_period}-01", "%Y-%m-%d")
 
-        # Delete existing data for this execution_id
+        # Delete existing data for this billing period
         delete_query = f"""
         DELETE FROM `{self.table_ref}`
-        WHERE execution_id = '{execution_id}'
-          AND bill_billing_period_start_date = TIMESTAMP('{billing_timestamp.isoformat()}')
+        WHERE bill_billing_period_start_date = TIMESTAMP('{billing_timestamp.isoformat()}')
         """
 
         delete_job = self.client.query(delete_query)
         result = delete_job.result()
 
         if delete_job.num_dml_affected_rows:
-            print(f"   ✓ Deleted {delete_job.num_dml_affected_rows:,} existing rows")
+            print(f"   ✓ Deleted {delete_job.num_dml_affected_rows:,} existing rows for {billing_period}")
 
         # Load the Parquet file
         job_config = bigquery.LoadJobConfig(
@@ -156,6 +155,8 @@ class BigQueryLoader:
             ]
         )
 
+        print(f"   📤 Uploading {parquet_file.name} to BigQuery...")
+
         with open(parquet_file, "rb") as source_file:
             job = self.client.load_table_from_file(
                 source_file,
@@ -163,6 +164,7 @@ class BigQueryLoader:
                 job_config=job_config
             )
 
+        print(f"   ⏳ Processing load job...")
         job.result()
 
         if job.errors:
