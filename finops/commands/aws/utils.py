@@ -13,7 +13,7 @@ def load_and_validate_config(config_path, cli_args=None):
     if cli_args is None:
         cli_args = {}
     config = FinopsConfig.from_cli_args(config_path, cli_args)
-    config.validate()
+    config.validate_aws()
     return config
 
 

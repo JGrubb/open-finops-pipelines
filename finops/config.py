@@ -6,29 +6,53 @@ from typing import Optional
 
 @dataclass
 class AWSConfig:
-    """AWS configuration settings."""
+    """AWS configuration settings - combines source + destination for backward compatibility."""
+    # Source settings
     bucket: str
     prefix: str
     export_name: str
     aws_access_key_id: str
     aws_secret_access_key: str
-    cur_version: str = "v2"  # Default to v2
-    region: str = "us-east-1"  # Default region
+    cur_version: str = "v2"
+    region: str = "us-east-1"
+
+    # Destination settings
+    destination_backend: str = "bigquery"
+    destination_dataset: str = ""
+    destination_table: str = ""
+
+
+@dataclass
+class AzureConfig:
+    """Azure configuration settings - combines source + destination."""
+    # Source settings
+    storage_account: str
+    container: str
+    export_name: str
+    tenant_id: str
+    client_id: str
+    client_secret: str
+
+    # Destination settings
+    destination_backend: str = "bigquery"
+    destination_dataset: str = ""
+    destination_table: str = ""
 
 
 @dataclass
 class BigQueryConfig:
     """BigQuery configuration settings."""
     project_id: str
-    dataset_id: str
-    table_id: str
     credentials_path: str
+    dataset_id: str = ""  # Vendor-specific dataset
+    table_id: str = ""    # Vendor-specific table
 
 
 @dataclass
 class DatabaseConfig:
     """Database backend configuration."""
-    backend: str = "duckdb"  # Options: "duckdb", "bigquery"
+    destination: str = "bigquery"  # Default destination backend
+    local: str = "duckdb"  # Local operations backend
     duckdb: Optional['DuckDBConfig'] = None
     bigquery: Optional[BigQueryConfig] = None
 
@@ -36,14 +60,15 @@ class DatabaseConfig:
 @dataclass
 class DuckDBConfig:
     """DuckDB configuration settings."""
-    persistent: bool = False  # Default to in-memory
+    persistent: bool = False
 
 
 @dataclass
 class FinopsConfig:
     """Main configuration for finops CLI."""
-    aws: AWSConfig
-    database: DatabaseConfig
+    aws: Optional[AWSConfig] = None
+    azure: Optional[AzureConfig] = None
+    database: DatabaseConfig = None
     data_dir: str = "./data"
 
     @property
@@ -70,76 +95,134 @@ class FinopsConfig:
 
     @property
     def bigquery(self) -> Optional[BigQueryConfig]:
-        """Convenience property to access BigQuery config."""
+        """Convenience property to access BigQuery config with AWS-specific dataset/table."""
+        if not self.database.bigquery:
+            return None
+
+        # Return BigQuery config with vendor-specific dataset/table if AWS is configured
+        if self.aws and self.aws.destination_backend == "bigquery":
+            return BigQueryConfig(
+                project_id=self.database.bigquery.project_id,
+                credentials_path=self.database.bigquery.credentials_path,
+                dataset_id=self.aws.destination_dataset,
+                table_id=self.aws.destination_table
+            )
+
+        return self.database.bigquery
+
+    def get_bigquery_config_for_vendor(self, vendor: str) -> Optional[BigQueryConfig]:
+        """Get BigQuery config with vendor-specific dataset/table."""
+        if not self.database.bigquery:
+            return None
+
+        if vendor == "aws" and self.aws:
+            return BigQueryConfig(
+                project_id=self.database.bigquery.project_id,
+                credentials_path=self.database.bigquery.credentials_path,
+                dataset_id=self.aws.destination_dataset,
+                table_id=self.aws.destination_table
+            )
+        elif vendor == "azure" and self.azure:
+            return BigQueryConfig(
+                project_id=self.database.bigquery.project_id,
+                credentials_path=self.database.bigquery.credentials_path,
+                dataset_id=self.azure.destination_dataset,
+                table_id=self.azure.destination_table
+            )
+
         return self.database.bigquery
 
     @classmethod
     def from_file(cls, config_path: Path) -> "FinopsConfig":
-        """Load configuration from TOML file."""
+        """Load configuration from TOML file with source/destination structure."""
         if not config_path.exists():
             raise FileNotFoundError(f"Configuration file not found: {config_path}")
 
         config_data = toml.load(config_path)
 
-        # Extract AWS config
-        aws_data = config_data.get("aws", {})
-        if not aws_data:
-            raise ValueError("Missing [aws] section in configuration")
-
-        required_aws_fields = ["bucket", "prefix", "export_name", "aws_access_key_id", "aws_secret_access_key"]
-        for field in required_aws_fields:
-            if field not in aws_data:
-                raise ValueError(f"Missing required AWS configuration: {field}")
-
-        aws_config = AWSConfig(
-            bucket=aws_data["bucket"],
-            prefix=aws_data["prefix"],
-            export_name=aws_data["export_name"],
-            aws_access_key_id=aws_data["aws_access_key_id"],
-            aws_secret_access_key=aws_data["aws_secret_access_key"],
-            cur_version=aws_data.get("cur_version", "v2"),
-            region=aws_data.get("region", "us-east-1")
-        )
-
-        # Extract database config
+        # Extract database config first (needed for inheritance)
         db_data = config_data.get("database", {})
-        backend = db_data.get("backend", db_data.get("local", "duckdb"))
+        default_destination = db_data.get("destination", "bigquery")
+        local_backend = db_data.get("local", "duckdb")
 
         duckdb_config = None
         bigquery_config = None
 
-        # Always load DuckDB config if present (used for local operations)
+        # Load DuckDB config if present
         duckdb_data = db_data.get("duckdb", {})
-        if duckdb_data or backend == "duckdb":
+        if duckdb_data or local_backend == "duckdb":
             duckdb_config = DuckDBConfig(
                 persistent=duckdb_data.get("persistent", False)
             )
 
-        # Always load BigQuery config if present (used for remote operations)
+        # Load BigQuery config if present
         bq_data = db_data.get("bigquery", {})
         if bq_data:
-            required_bq_fields = ["project_id", "dataset_id", "table_id", "credentials_path"]
+            required_bq_fields = ["project_id", "credentials_path"]
             missing_fields = [f for f in required_bq_fields if f not in bq_data]
 
             if not missing_fields:
                 bigquery_config = BigQueryConfig(
                     project_id=bq_data["project_id"],
-                    dataset_id=bq_data["dataset_id"],
-                    table_id=bq_data["table_id"],
                     credentials_path=bq_data["credentials_path"]
                 )
 
         database_config = DatabaseConfig(
-            backend=backend,
+            destination=default_destination,
+            local=local_backend,
             duckdb=duckdb_config,
             bigquery=bigquery_config
         )
+
+        # Extract AWS config (source + destination)
+        aws_config = None
+        if "aws" in config_data:
+            aws_source = config_data["aws"].get("source", {})
+            aws_dest = config_data["aws"].get("destination", {})
+
+            if aws_source:
+                aws_config = AWSConfig(
+                    # Source settings
+                    bucket=aws_source.get("bucket", ""),
+                    prefix=aws_source.get("prefix", ""),
+                    export_name=aws_source.get("export_name", ""),
+                    aws_access_key_id=aws_source.get("aws_access_key_id", ""),
+                    aws_secret_access_key=aws_source.get("aws_secret_access_key", ""),
+                    cur_version=aws_source.get("cur_version", "v2"),
+                    region=aws_source.get("region", "us-east-1"),
+                    # Destination settings (inherit from database.destination if not specified)
+                    destination_backend=aws_dest.get("backend", default_destination),
+                    destination_dataset=aws_dest.get("dataset", ""),
+                    destination_table=aws_dest.get("table", "")
+                )
+
+        # Extract Azure config (source + destination)
+        azure_config = None
+        if "azure" in config_data:
+            azure_source = config_data["azure"].get("source", {})
+            azure_dest = config_data["azure"].get("destination", {})
+
+            if azure_source:
+                azure_config = AzureConfig(
+                    # Source settings
+                    storage_account=azure_source.get("storage_account", ""),
+                    container=azure_source.get("container", ""),
+                    export_name=azure_source.get("export_name", ""),
+                    tenant_id=azure_source.get("tenant_id", ""),
+                    client_id=azure_source.get("client_id", ""),
+                    client_secret=azure_source.get("client_secret", ""),
+                    # Destination settings (inherit from database.destination if not specified)
+                    destination_backend=azure_dest.get("backend", default_destination),
+                    destination_dataset=azure_dest.get("dataset", ""),
+                    destination_table=azure_dest.get("table", "")
+                )
 
         # Extract global config
         data_dir = config_data.get("data_dir", "./data")
 
         return cls(
             aws=aws_config,
+            azure=azure_config,
             database=database_config,
             data_dir=data_dir
         )
@@ -182,8 +265,11 @@ class FinopsConfig:
 
         return config
 
-    def validate(self):
-        """Validate configuration and raise errors for missing required fields."""
+    def validate_aws(self):
+        """Validate AWS configuration and raise errors for missing required fields."""
+        if not self.aws:
+            raise ValueError("AWS configuration is not loaded")
+
         errors = []
 
         if not self.aws.bucket:
@@ -200,4 +286,27 @@ class FinopsConfig:
             errors.append("AWS cur_version must be 'v1' or 'v2'")
 
         if errors:
-            raise ValueError("Configuration validation failed:\n" + "\n".join(f"  - {error}" for error in errors))
+            raise ValueError("AWS configuration validation failed:\n" + "\n".join(f"  - {error}" for error in errors))
+
+    def validate_azure(self):
+        """Validate Azure configuration and raise errors for missing required fields."""
+        if not self.azure:
+            raise ValueError("Azure configuration is not loaded")
+
+        errors = []
+
+        if not self.azure.storage_account:
+            errors.append("Azure storage_account is required")
+        if not self.azure.container:
+            errors.append("Azure container is required")
+        if not self.azure.export_name:
+            errors.append("Azure export_name is required")
+        if not self.azure.tenant_id:
+            errors.append("Azure tenant_id is required")
+        if not self.azure.client_id:
+            errors.append("Azure client_id is required")
+        if not self.azure.client_secret:
+            errors.append("Azure client_secret is required")
+
+        if errors:
+            raise ValueError("Azure configuration validation failed:\n" + "\n".join(f"  - {error}" for error in errors))
