@@ -13,7 +13,7 @@ class StateChecker:
     def __init__(self, config):
         """Initialize with configuration."""
         self.config = config
-        self.duckdb_path = config.duckdb.database_path if hasattr(config, 'duckdb') else None
+        self.duckdb_path = config.duckdb_path if hasattr(config, 'duckdb_path') else None
         self.bigquery_config = config.bigquery if hasattr(config, 'bigquery') else None
 
     def get_loaded_execution_ids(self, vendor: str = "aws") -> Dict[str, str]:

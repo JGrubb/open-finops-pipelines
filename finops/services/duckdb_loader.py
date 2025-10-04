@@ -11,6 +11,12 @@ class DuckDBLoader:
     """Handles loading AWS CUR data into DuckDB with schema evolution."""
 
     def __init__(self, database_path: str):
+        """
+        Initialize DuckDB loader.
+
+        Args:
+            database_path: Path to DuckDB database file, or ":memory:" for in-memory database
+        """
         self.database_path = database_path
         self.schema_manager = SchemaManager()
         self.connection: Optional[duckdb.DuckDBPyConnection] = None

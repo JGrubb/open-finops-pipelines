@@ -36,7 +36,7 @@ class DatabaseConfig:
 @dataclass
 class DuckDBConfig:
     """DuckDB configuration settings."""
-    database_path: str = "./data/finops.duckdb"
+    persistent: bool = False  # Default to in-memory
 
 
 @dataclass
@@ -55,6 +55,13 @@ class FinopsConfig:
     def parquet_dir(self) -> str:
         """Parquet export directory."""
         return f"{self.data_dir}/exports"
+
+    @property
+    def duckdb_path(self) -> str:
+        """DuckDB database path - returns :memory: if not persistent."""
+        if self.database.duckdb and self.database.duckdb.persistent:
+            return f"{self.data_dir}/finops.duckdb"
+        return ":memory:"
 
     @property
     def duckdb(self) -> Optional[DuckDBConfig]:
@@ -105,7 +112,7 @@ class FinopsConfig:
         duckdb_data = db_data.get("duckdb", {})
         if duckdb_data or backend == "duckdb":
             duckdb_config = DuckDBConfig(
-                database_path=duckdb_data.get("database_path", "./data/finops.duckdb")
+                persistent=duckdb_data.get("persistent", False)
             )
 
         # Always load BigQuery config if present (used for remote operations)
