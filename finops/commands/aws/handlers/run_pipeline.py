@@ -10,6 +10,7 @@ from finops.services.billing_extractor import BillingExtractorService
 from finops.services.duckdb_loader import DuckDBLoader
 from finops.services.parquet_exporter import ParquetExporter
 from finops.services.bigquery_loader import BigQueryLoader
+from finops.services.state_checker import StateChecker
 
 
 @handle_command_errors
@@ -36,8 +37,9 @@ def run_pipeline(config_path, args):
 
     # Step 1: Discover manifests
     print("Step 1/5: Discovering manifests...")
-    # For full pipeline, don't check state - process everything from S3
-    manifests = discover_and_filter_manifests(config, state_checker=None,
+    # Check state to only process changed manifests
+    state_checker = StateChecker(config)
+    manifests = discover_and_filter_manifests(config, state_checker=state_checker,
                                              start_date=args.start_date,
                                              end_date=args.end_date)
 
