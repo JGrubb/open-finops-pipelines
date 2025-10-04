@@ -1,10 +1,26 @@
 # FinOps Pipeline Configuration
 
 # Global settings
-# All pipeline data (staging CSVs, parquet exports, DuckDB) stored under this directory
 data_dir = "./data"
 
-[aws]
+[database]
+# Default destination backend for all vendors
+destination = "bigquery"
+
+# Local operations backend
+local = "duckdb"
+
+[database.duckdb]
+# Use persistent DuckDB file or in-memory database
+persistent = false
+
+[database.bigquery]
+# BigQuery project and credentials (shared across all vendors)
+project_id = "my-gcp-project"
+credentials_path = "/path/to/service-account-key.json"
+
+# AWS billing pipeline configuration
+[aws.source]
 # S3 bucket where CUR data is stored
 bucket = "my-cur-bucket"
 
@@ -14,12 +30,62 @@ prefix = "cur-reports"
 # CUR export name (from AWS Cost and Usage Reports setup)
 export_name = "my-cur-export"
 
-# AWS credentials
-aws_access_key_id = "AKIAIOSFODNN7EXAMPLE"
-aws_secret_access_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-
-# AWS region where S3 bucket is located
-region = "us-east-1"
-
 # CUR version - v1 (legacy) or v2 (current)
 cur_version = "v2"
+
+# Export format - csv or parquet (auto-detected if not specified)
+export_format = "csv"
+
+# Optional: Date range filters (YYYY-MM format)
+# start_date = "2024-01"
+# end_date = "2024-12"
+
+# Optional: Drop existing tables before import
+reset = false
+
+# AWS credentials (optional - uses AWS SDK credential chain if not specified)
+aws_access_key_id = "AKIAIOSFODNN7EXAMPLE"
+aws_secret_access_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+region = "us-east-1"
+
+[aws.destination]
+# Backend defaults to database.destination ("bigquery")
+# Uncomment to override: backend = "duckdb"
+
+# BigQuery dataset and table for AWS billing data
+dataset = "aws_billing_data"
+table = "aws_cur_data"
+
+# Azure billing pipeline configuration
+[azure.source]
+# Azure storage account name
+storage_account = "mystorageaccount"
+
+# Container name where billing exports are stored
+container = "billing-exports"
+
+# Export name
+export_name = "azure-billing-export"
+
+# Azure service principal credentials
+tenant_id = "00000000-0000-0000-0000-000000000000"
+client_id = "00000000-0000-0000-0000-000000000000"
+client_secret = "your-client-secret"
+
+[azure.destination]
+# Backend defaults to database.destination ("bigquery")
+# Uncomment to override: backend = "clickhouse"
+
+# BigQuery dataset and table for Azure billing data
+dataset = "azure_billing_data"
+table = "azure_cost_data"
+
+# GCP billing pipeline configuration (future)
+# [gcp.source]
+# project_id = "my-billing-project"
+# dataset_id = "billing_export"
+# table_id = "gcp_billing_export"
+#
+# [gcp.destination]
+# dataset = "gcp_billing_data"
+# table = "gcp_cost_data"
