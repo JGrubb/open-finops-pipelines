@@ -4,6 +4,7 @@ from pathlib import Path
 
 from finops import __version__
 from finops.commands.aws import setup_aws_parser
+from finops.commands.azure import setup_azure_parser
 
 
 def config_command(config_path, args):
@@ -58,6 +59,9 @@ def main():
 
     # AWS subcommand
     setup_aws_parser(subparsers)
+
+    # Azure subcommand
+    setup_azure_parser(subparsers)
 
     args = parser.parse_args()
 
