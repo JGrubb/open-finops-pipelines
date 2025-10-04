@@ -10,26 +10,30 @@ from finops.services.schema_manager import SchemaManager
 class DuckDBLoader:
     """Handles loading AWS CUR data into DuckDB with schema evolution."""
 
-    def __init__(self, database_path: str):
+    def __init__(self, database_path: str, connection: Optional[duckdb.DuckDBPyConnection] = None):
         """
         Initialize DuckDB loader.
 
         Args:
             database_path: Path to DuckDB database file, or ":memory:" for in-memory database
+            connection: Optional existing DuckDB connection (for sharing in-memory connections)
         """
         self.database_path = database_path
         self.schema_manager = SchemaManager()
-        self.connection: Optional[duckdb.DuckDBPyConnection] = None
+        self.connection: Optional[duckdb.DuckDBPyConnection] = connection
+        self._owns_connection = connection is None  # Track if we created the connection
 
     def __enter__(self):
-        """Context manager entry."""
-        self.connection = duckdb.connect(self.database_path)
+        """Context manager entry - open database connection if needed."""
+        if self.connection is None:
+            self.connection = duckdb.connect(self.database_path)
         return self
 
     def __exit__(self, _exc_type, _exc_val, _exc_tb):
-        """Context manager exit."""
-        if self.connection:
+        """Context manager exit - close database connection if we own it."""
+        if self.connection and self._owns_connection:
             self.connection.close()
+            self.connection = None
 
     def get_existing_table_columns(self, table_name: str) -> Set[str]:
         """Get set of column names from existing table."""

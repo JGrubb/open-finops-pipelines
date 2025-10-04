@@ -65,27 +65,39 @@ def run_pipeline(config_path, args):
     print(f"\nStep 3/5: Loading to DuckDB...")
     ensure_duckdb_path(config)
 
-    with DuckDBLoader(config.duckdb_path) as loader:
-        load_stats = loader.load_billing_data_from_manifests(
-            manifests=manifests,
-            staging_dir=config.staging_dir,
-            table_name="aws_billing_data"
-        )
-        print(f"  Loaded: {load_stats['loaded_executions']} execution(s)")
-        print(f"  Total rows: {load_stats['total_rows']:,}")
+    # For in-memory DuckDB, we need to share the connection between loader and exporter
+    # Otherwise the exporter would open a new empty in-memory database
+    import duckdb
+    shared_conn = None
+    if config.duckdb_path == ":memory:":
+        shared_conn = duckdb.connect(":memory:")
 
-    # Step 4: Export to Parquet (by execution with execution_id)
-    print(f"\nStep 4/5: Exporting to Parquet...")
-    with ParquetExporter(config.duckdb_path, config.parquet_dir, "aws_billing_data") as exporter:
-        export_stats = exporter.export_billing_data_by_execution(
-            manifests,
-            vendor="aws",
-            overwrite=False,
-            compression="snappy"
-        )
-        exported = sum(1 for s in export_stats.values() if s == "exported")
-        skipped = sum(1 for s in export_stats.values() if s == "skipped")
-        print(f"  Exported: {exported}, Skipped: {skipped}")
+    try:
+        with DuckDBLoader(config.duckdb_path, connection=shared_conn) as loader:
+            load_stats = loader.load_billing_data_from_manifests(
+                manifests=manifests,
+                staging_dir=config.staging_dir,
+                table_name="aws_billing_data"
+            )
+            print(f"  Loaded: {load_stats['loaded_executions']} execution(s)")
+            print(f"  Total rows: {load_stats['total_rows']:,}")
+
+        # Step 4: Export to Parquet (by execution with execution_id)
+        print(f"\nStep 4/5: Exporting to Parquet...")
+        with ParquetExporter(config.duckdb_path, config.parquet_dir, "aws_billing_data", connection=shared_conn) as exporter:
+            export_stats = exporter.export_billing_data_by_execution(
+                manifests,
+                vendor="aws",
+                overwrite=False,
+                compression="snappy"
+            )
+            exported = sum(1 for s in export_stats.values() if s == "exported")
+            skipped = sum(1 for s in export_stats.values() if s == "skipped")
+            print(f"  Exported: {exported}, Skipped: {skipped}")
+    finally:
+        # Close shared connection if we created one
+        if shared_conn:
+            shared_conn.close()
 
     # Step 5: Load to BigQuery (only new execution_ids)
     if config.bigquery:

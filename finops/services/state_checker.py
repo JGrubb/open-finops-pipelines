@@ -81,6 +81,10 @@ class StateChecker:
 
     def _query_duckdb(self, vendor: str) -> Dict[str, str]:
         """Query DuckDB for loaded execution_ids."""
+        # Skip in-memory databases - they don't persist state
+        if self.duckdb_path == ":memory:":
+            return {}
+
         duckdb_path = Path(self.duckdb_path)
 
         if not duckdb_path.exists():

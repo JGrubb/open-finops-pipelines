@@ -7,21 +7,26 @@ from datetime import datetime
 class ParquetExporter:
     """Service for exporting DuckDB data to Parquet files."""
 
-    def __init__(self, duckdb_path: str, parquet_dir: str, table_name: str = "aws_billing_data"):
-        self.duckdb_path = Path(duckdb_path)
+    def __init__(self, duckdb_path: str, parquet_dir: str, table_name: str = "aws_billing_data", connection=None):
+        self.duckdb_path = Path(duckdb_path) if duckdb_path != ":memory:" else duckdb_path
         self.parquet_dir = Path(parquet_dir)
         self.table_name = table_name
         self.parquet_dir.mkdir(parents=True, exist_ok=True)
+        self.conn = connection
+        self._owns_connection = connection is None
 
     def __enter__(self):
-        """Context manager entry."""
-        self.conn = duckdb.connect(str(self.duckdb_path))
+        """Context manager entry - open connection if needed."""
+        if self.conn is None:
+            db_path = str(self.duckdb_path) if isinstance(self.duckdb_path, Path) else self.duckdb_path
+            self.conn = duckdb.connect(db_path)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit."""
-        if hasattr(self, 'conn'):
+        """Context manager exit - close connection if we own it."""
+        if self.conn and self._owns_connection:
             self.conn.close()
+            self.conn = None
 
     def export_billing_data_by_execution(
         self,
