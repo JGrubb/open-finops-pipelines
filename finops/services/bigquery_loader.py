@@ -88,7 +88,7 @@ class BigQueryLoader:
         self._ensure_table_exists()
 
         # Get currently loaded execution_ids from BigQuery
-        loaded_execution_ids = self._get_loaded_execution_ids()
+        loaded_execution_ids = self.get_loaded_execution_ids()
 
         results = {}
         executions_to_load = []
@@ -123,7 +123,7 @@ class BigQueryLoader:
 
         return results
 
-    def _get_loaded_execution_ids(self) -> Dict[str, str]:
+    def get_loaded_execution_ids(self) -> Dict[str, str]:
         """Query BigQuery to get currently loaded execution_ids by billing period.
 
         Returns dict mapping billing_period -> execution_id.
