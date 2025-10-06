@@ -411,6 +411,27 @@ class DuckDBLoader:
             'results': results
         }
 
+    def truncate_table(self, table_name: str = "aws_billing_data") -> int:
+        """
+        Truncate (delete all rows from) a table to free memory.
+        Returns number of rows deleted.
+        """
+        if not self.connection:
+            raise RuntimeError("Connection not established. Use within context manager.")
+
+        try:
+            # Get row count before truncating
+            result = self.connection.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
+            row_count = result[0] if result else 0
+
+            # Truncate the table
+            self.connection.execute(f"DELETE FROM {table_name}")
+
+            return row_count
+        except Exception:
+            # Table doesn't exist
+            return 0
+
     def get_table_info(self, table_name: str = "aws_billing_data") -> Optional[Dict]:
         """Get information about the loaded table."""
         try:
