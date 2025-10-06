@@ -205,6 +205,90 @@ Special handling:
 - Column names normalized (replace `/` and special chars with `_`)
 - Manifests sorted DESC by billing_month to establish schema early
 
+## Deployment
+
+### Docker
+
+Build and run the pipeline in a container:
+
+```bash
+# Build the image
+docker build -t finops-pipeline .
+
+# Run with mounted config and data volumes
+docker run --rm \
+  -v $(pwd)/config.toml:/app/config.toml:ro \
+  -v $(pwd)/data:/app/data \
+  finops-pipeline finops aws run-pipeline
+
+# Run a specific command
+docker run --rm \
+  -v $(pwd)/config.toml:/app/config.toml:ro \
+  finops-pipeline finops aws discover-manifests
+```
+
+### Google Cloud Run + Cloud Scheduler
+
+Deploy as a scheduled job on GCP:
+
+```bash
+# 1. Set project and region
+export PROJECT_ID=your-project-id
+export REGION=us-central1
+export SERVICE_NAME=finops-pipeline
+
+# 2. Enable required APIs
+gcloud services enable \
+  run.googleapis.com \
+  cloudbuild.googleapis.com \
+  cloudscheduler.googleapis.com \
+  artifactregistry.googleapis.com
+
+# 3. Create Artifact Registry repository (one-time)
+gcloud artifacts repositories create finops \
+  --repository-format=docker \
+  --location=$REGION
+
+# 4. Build and push image
+gcloud builds submit --tag $REGION-docker.pkg.dev/$PROJECT_ID/finops/$SERVICE_NAME
+
+# 5. Deploy to Cloud Run (no public access, manual execution)
+gcloud run deploy $SERVICE_NAME \
+  --image $REGION-docker.pkg.dev/$PROJECT_ID/finops/$SERVICE_NAME \
+  --region $REGION \
+  --no-allow-unauthenticated \
+  --memory 2Gi \
+  --timeout 3600 \
+  --set-env-vars "CONFIG_PATH=/app/config.toml"
+
+# 6. Create Cloud Scheduler job (daily at 2 AM UTC)
+gcloud scheduler jobs create http finops-daily \
+  --location $REGION \
+  --schedule "0 2 * * *" \
+  --uri "https://$(gcloud run services describe $SERVICE_NAME --region $REGION --format 'value(status.url)')" \
+  --http-method POST \
+  --oidc-service-account-email YOUR_SERVICE_ACCOUNT@$PROJECT_ID.iam.gserviceaccount.com
+```
+
+Configuration options:
+- Mount config.toml as a Secret Manager secret
+- Use environment variables for sensitive credentials
+- Adjust memory/timeout based on data volume
+- Override CMD to run specific commands
+
+### Environment Variables
+
+Instead of config.toml, you can use environment variables:
+
+```bash
+export AWS_ACCESS_KEY_ID=your-key
+export AWS_SECRET_ACCESS_KEY=your-secret
+export AWS_DEFAULT_REGION=us-east-1
+export FINOPS_S3_BUCKET=your-bucket
+export FINOPS_S3_PREFIX=path/to/cur
+# ... etc
+```
+
 ## Development
 
 ```bash
