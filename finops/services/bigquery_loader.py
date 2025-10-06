@@ -1,4 +1,3 @@
-import uuid
 from pathlib import Path
 from typing import List, Dict
 from datetime import datetime
@@ -24,6 +23,53 @@ class BigQueryLoader:
 
         # Construct table reference
         self.table_ref = f"{bigquery_config.project_id}.{bigquery_config.dataset_id}.{bigquery_config.table_id}"
+
+    def _parse_billing_timestamp(self, billing_period: str) -> datetime:
+        """Convert billing period (YYYY-MM) to timestamp (YYYY-MM-01 00:00:00)."""
+        return datetime.strptime(f"{billing_period}-01", "%Y-%m-%d")
+
+    def _delete_partition(self, billing_period: str) -> int:
+        """Delete existing data for a billing period using optimized partition pruning.
+
+        Returns number of rows deleted.
+        """
+        billing_timestamp = self._parse_billing_timestamp(billing_period)
+
+        delete_query = f"""
+        DELETE FROM `{self.table_ref}`
+        WHERE DATE_TRUNC(bill_billing_period_start_date, MONTH) = TIMESTAMP('{billing_timestamp.isoformat()}')
+        """
+
+        delete_job = self.client.query(delete_query)
+        delete_job.result()
+
+        return delete_job.num_dml_affected_rows or 0
+
+    def _create_load_config(self) -> bigquery.LoadJobConfig:
+        """Create standard BigQuery load job configuration."""
+        return bigquery.LoadJobConfig(
+            source_format=bigquery.SourceFormat.PARQUET,
+            write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+            schema_update_options=[
+                bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION
+            ]
+        )
+
+    def _load_parquet_file(self, parquet_file: Path) -> int:
+        """Load a Parquet file to BigQuery and return number of rows loaded."""
+        with open(parquet_file, "rb") as source_file:
+            job = self.client.load_table_from_file(
+                source_file,
+                self.table_ref,
+                job_config=self._create_load_config()
+            )
+
+        job.result()
+
+        if job.errors:
+            raise Exception(f"BigQuery load job failed: {job.errors}")
+
+        return job.output_rows or 0
 
     def load_billing_data_by_execution(
         self,
@@ -67,13 +113,13 @@ class BigQueryLoader:
             execution_key = f"{manifest.billing_period}:{manifest.id}"
             try:
                 result = self._load_single_execution(
-                    manifest.billing_period, manifest.id, vendor, overwrite
+                    manifest.billing_period, manifest.id, vendor
                 )
                 results[execution_key] = result
                 print(f"✓ {manifest.billing_period} ({manifest.id[:8]}...): {result}")
             except Exception as e:
                 results[execution_key] = "failed"
-                print(f"✗ {manifest.billing_period} ({manifest.id[:8]}...): failed - {str(e)}")
+                print(f"✗ {manifest.billing_period} ({manifest.id[:8]}...): {str(e)}")
 
         return results
 
@@ -108,76 +154,39 @@ class BigQueryLoader:
             # Table doesn't exist or query failed - return empty
             return {}
 
+    def _delete_and_load_partition(self, parquet_file: Path, billing_period: str) -> None:
+        """Delete existing partition data and load new Parquet file to BigQuery."""
+        # Delete existing data for this billing period
+        rows_deleted = self._delete_partition(billing_period)
+
+        if rows_deleted:
+            print(f"   Deleted {rows_deleted:,} existing rows for {billing_period}")
+
+        # Load the Parquet file
+        print(f"   Loading {parquet_file.name} to BigQuery...")
+        rows_loaded = self._load_parquet_file(parquet_file)
+
+        if rows_loaded:
+            print(f"   Loaded {rows_loaded:,} rows")
+
     def _load_single_execution(
         self,
         billing_period: str,
         execution_id: str,
-        vendor: str,
-        overwrite: bool
+        vendor: str
     ) -> str:
         """Load billing data for a single execution to BigQuery from Parquet file."""
-        # Check if Parquet file exists for this execution
         parquet_file = self.parquet_dir / f"{billing_period}_{execution_id}_{vendor}_billing.parquet"
         if not parquet_file.exists():
             raise ValueError(f"Parquet file not found: {parquet_file}")
 
-        try:
-            # Load to BigQuery from Parquet file with DELETE + APPEND
-            self._load_execution_to_bigquery(parquet_file, billing_period, execution_id)
-            return "loaded"
-
-        except Exception as e:
-            raise
-
-    def _load_execution_to_bigquery(self, parquet_file: Path, billing_period: str, execution_id: str) -> None:
-        """Load billing data for an execution to BigQuery, replacing data for the billing period."""
-        # Convert billing period to timestamp
-        billing_timestamp = datetime.strptime(f"{billing_period}-01", "%Y-%m-%d")
-
-        # Delete existing data for this billing period
-        delete_query = f"""
-        DELETE FROM `{self.table_ref}`
-        WHERE bill_billing_period_start_date = TIMESTAMP('{billing_timestamp.isoformat()}')
-        """
-
-        delete_job = self.client.query(delete_query)
-        result = delete_job.result()
-
-        if delete_job.num_dml_affected_rows:
-            print(f"   ✓ Deleted {delete_job.num_dml_affected_rows:,} existing rows for {billing_period}")
-
-        # Load the Parquet file
-        job_config = bigquery.LoadJobConfig(
-            source_format=bigquery.SourceFormat.PARQUET,
-            write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
-            schema_update_options=[
-                bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION
-            ]
-        )
-
-        print(f"   📤 Uploading {parquet_file.name} to BigQuery...")
-
-        with open(parquet_file, "rb") as source_file:
-            job = self.client.load_table_from_file(
-                source_file,
-                self.table_ref,
-                job_config=job_config
-            )
-
-        print(f"   ⏳ Processing load job...")
-        job.result()
-
-        if job.errors:
-            raise Exception(f"BigQuery load job failed: {job.errors}")
-
-        if job.output_rows:
-            print(f"   ✓ Loaded {job.output_rows:,} rows")
+        self._delete_and_load_partition(parquet_file, billing_period)
+        return "loaded"
 
     def load_billing_periods(
         self,
         billing_periods: List[str],
-        vendor: str = "aws",
-        overwrite: bool = False
+        vendor: str = "aws"
     ) -> Dict[str, str]:
         """Load multiple billing periods to BigQuery from Parquet files.
 
@@ -187,107 +196,41 @@ class BigQueryLoader:
 
         for billing_period in billing_periods:
             try:
-                result = self._load_single_period(
-                    billing_period, vendor, overwrite
-                )
+                result = self._load_single_period(billing_period, vendor)
                 results[billing_period] = result
-                print(f"✓ {billing_period}: {result}")
+                print(f"  {billing_period}: {result}")
             except Exception as e:
                 results[billing_period] = "failed"
-                print(f"✗ {billing_period}: failed - {str(e)}")
+                print(f"  {billing_period}: failed - {str(e)}")
 
         return results
 
     def _load_single_period(
         self,
         billing_period: str,
-        vendor: str,
-        overwrite: bool
+        vendor: str
     ) -> str:
         """Load a single billing period to BigQuery from Parquet file."""
-        # Check if Parquet file exists for this billing period
+        # Ensure table exists with proper partitioning and clustering
+        self._ensure_table_exists()
+
         parquet_file = self.parquet_dir / f"{billing_period}_{vendor}_billing.parquet"
         if not parquet_file.exists():
             raise ValueError(f"Parquet file not found: {parquet_file}")
 
-        try:
-            # Load to BigQuery from Parquet file with DELETE + APPEND
-            self._load_parquet_to_bigquery(parquet_file, billing_period)
-            return "loaded"
-
-        except Exception as e:
-            raise
-
-    def _load_parquet_to_bigquery(self, parquet_file: Path, billing_period: str) -> None:
-        """Load a Parquet file to BigQuery, replacing the partition for that billing period.
-
-        Always performs DELETE + APPEND to ensure data is replaced, not duplicated.
-        """
-        # Ensure table exists with proper partitioning and clustering
-        self._ensure_table_exists()
-
-        # Convert billing period to timestamp (e.g., "2025-09" -> "2025-09-01 00:00:00")
-        billing_timestamp = datetime.strptime(f"{billing_period}-01", "%Y-%m-%d")
-
-        print(f"   Deleting existing data for {billing_period}...")
-
-        # Delete existing data for this billing period
-        delete_query = f"""
-        DELETE FROM `{self.table_ref}`
-        WHERE bill_billing_period_start_date = TIMESTAMP('{billing_timestamp.isoformat()}')
-        """
-
-        delete_job = self.client.query(delete_query)
-        result = delete_job.result()  # Wait for deletion to complete
-
-        # Get number of rows deleted
-        if delete_job.num_dml_affected_rows:
-            print(f"   ✓ Deleted {delete_job.num_dml_affected_rows:,} existing rows")
-        else:
-            print(f"   ✓ No existing data found for {billing_period}")
-
-        print(f"   📤 Loading {parquet_file.name} to BigQuery...")
-
-        # Configure the load job to append the new data
-        # Use schema_update_options to allow field addition if needed
-        job_config = bigquery.LoadJobConfig(
-            source_format=bigquery.SourceFormat.PARQUET,
-            write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
-            schema_update_options=[
-                bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION
-            ]
-        )
-
-        # Load the Parquet file
-        with open(parquet_file, "rb") as source_file:
-            job = self.client.load_table_from_file(
-                source_file,
-                self.table_ref,
-                job_config=job_config
-            )
-
-        # Wait for the job to complete
-        job.result()
-
-        if job.errors:
-            raise Exception(f"BigQuery load job failed: {job.errors}")
-
-        # Report rows loaded
-        if job.output_rows:
-            print(f"   ✓ Loaded {job.output_rows:,} rows to partition {billing_period}")
-        else:
-            print(f"   ✓ Load completed for {billing_period}")
+        self._delete_and_load_partition(parquet_file, billing_period)
+        return "loaded"
 
     def _ensure_table_exists(self) -> None:
         """Ensure the BigQuery table exists with proper partitioning and clustering."""
         try:
             # Check if table already exists
-            table = self.client.get_table(self.table_ref)
-            print(f"✓ BigQuery table {self.table_ref} already exists")
-            return  # Table exists, nothing to do
+            self.client.get_table(self.table_ref)
+            print(f"  BigQuery table {self.table_ref} already exists")
+            return
         except Exception:
             # Table doesn't exist, create it
-            print(f"✓ Creating BigQuery table {self.table_ref}...")
+            print(f"  Creating BigQuery table {self.table_ref}...")
 
         # Find the first available Parquet file to infer schema
         parquet_files = list(self.parquet_dir.glob("*_aws_billing.parquet"))
@@ -295,7 +238,7 @@ class BigQueryLoader:
             raise ValueError("No Parquet files found to infer schema")
 
         first_parquet_file = sorted(parquet_files)[0]
-        print(f"✓ Inferring schema from {first_parquet_file.name}")
+        print(f"  Inferring schema from {first_parquet_file.name}")
 
         # Create a temporary table to get the schema
         temp_table_id = f"{self.table_ref}_temp_schema"
@@ -340,8 +283,8 @@ class BigQueryLoader:
         table.clustering_fields = ["line_item_usage_start_date"]
 
         # Create the table
-        table = self.client.create_table(table)
-        print(f"✓ Created BigQuery table {self.table_ref} with monthly partitioning and clustering")
+        self.client.create_table(table)
+        print(f"  Created BigQuery table {self.table_ref} with monthly partitioning and clustering")
 
     def get_available_billing_periods(self, vendor: str = "aws") -> List[str]:
         """Get list of billing periods that have exported Parquet files available for BigQuery load."""
@@ -362,8 +305,7 @@ class BigQueryLoader:
     def validate_bigquery_connection(self) -> bool:
         """Validate BigQuery connection and dataset access."""
         try:
-            # Try to get dataset info
-            dataset = self.client.get_dataset(
+            self.client.get_dataset(
                 f"{self.bigquery_config.project_id}.{self.bigquery_config.dataset_id}"
             )
             return True
