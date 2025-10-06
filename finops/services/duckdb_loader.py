@@ -255,6 +255,50 @@ class DuckDBLoader:
                 'error': error_msg
             }
 
+    def get_loaded_execution_ids(self, table_name: str = "aws_billing_data") -> Dict[str, str]:
+        """
+        Query DuckDB for loaded execution_ids by billing period.
+
+        Returns dict mapping billing_period -> execution_id.
+        """
+        if not self.connection:
+            raise RuntimeError("Connection not established. Use within context manager.")
+
+        # Skip in-memory databases - they don't persist state
+        if self.database_path == ":memory:":
+            return {}
+
+        try:
+            # Query for distinct billing_period and execution_id combinations
+            query = f"""
+                SELECT DISTINCT
+                    PRINTF('%04d-%02d',
+                           EXTRACT(YEAR FROM bill_billing_period_start_date),
+                           EXTRACT(MONTH FROM bill_billing_period_start_date)
+                    ) as billing_period,
+                    execution_id
+                FROM {table_name}
+                WHERE execution_id IS NOT NULL
+                ORDER BY billing_period DESC
+            """
+
+            results = self.connection.execute(query).fetchall()
+
+            # Build map: billing_period -> execution_id
+            # If multiple execution_ids exist for a period, use the first one found
+            period_map = {}
+            for row in results:
+                billing_period = row[0]
+                execution_id = row[1]
+                if billing_period not in period_map:
+                    period_map[billing_period] = execution_id
+
+            return period_map
+
+        except Exception:
+            # Table doesn't exist or other error
+            return {}
+
     def _check_execution_loaded(self, table_name: str, billing_period: str, execution_id: str) -> bool:
         """Check if an execution_id is already loaded for a billing period."""
         if not self.connection:
