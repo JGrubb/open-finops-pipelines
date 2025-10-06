@@ -1,8 +1,6 @@
 import duckdb
-import uuid
 from pathlib import Path
-from typing import List, Dict, Optional
-from datetime import datetime
+from typing import List, Dict
 
 class ParquetExporter:
     """Service for exporting DuckDB data to Parquet files."""
@@ -22,7 +20,7 @@ class ParquetExporter:
             self.conn = duckdb.connect(db_path)
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, _exc_type, _exc_val, _exc_tb):
         """Context manager exit - close connection if we own it."""
         if self.conn and self._owns_connection:
             self.conn.close()
@@ -78,16 +76,15 @@ class ParquetExporter:
         if not self._has_data_for_execution(billing_period, execution_id):
             raise ValueError(f"No data found in DuckDB for {billing_period} execution {execution_id}")
 
-        try:
-            # Export to Parquet using DuckDB
-            self._export_execution_to_parquet(billing_period, execution_id, file_path, compression)
-            return "exported"
-
-        except Exception as e:
-            raise
+        # Export to Parquet using DuckDB
+        self._export_execution_to_parquet(billing_period, execution_id, file_path, compression)
+        return "exported"
 
     def _has_data_for_execution(self, billing_period: str, execution_id: str) -> bool:
         """Check if DuckDB has data for the specified execution_id."""
+        if not self.conn:
+            raise RuntimeError("Connection not established. Use within context manager.")
+
         try:
             year, month = billing_period.split('-')
             result = self.conn.execute(f"""
@@ -110,6 +107,9 @@ class ParquetExporter:
         compression: str
     ) -> None:
         """Export execution data to Parquet file using DuckDB COPY command."""
+        if not self.conn:
+            raise RuntimeError("Connection not established. Use within context manager.")
+
         year, month = billing_period.split('-')
 
         query = f"""
@@ -170,16 +170,15 @@ class ParquetExporter:
         if not self._has_data_for_period(billing_period, vendor):
             raise ValueError(f"No data found in DuckDB for billing period {billing_period}")
 
-        try:
-            # Export to Parquet using DuckDB
-            self._export_to_parquet(billing_period, vendor, file_path, compression)
-            return "exported"
+        # Export to Parquet using DuckDB
+        self._export_to_parquet(billing_period, file_path, compression)
+        return "exported"
 
-        except Exception as e:
-            raise
-
-    def _has_data_for_period(self, billing_period: str, vendor: str) -> bool:
+    def _has_data_for_period(self, billing_period: str, _vendor: str) -> bool:
         """Check if DuckDB has data for the specified billing period."""
+        if not self.conn:
+            raise RuntimeError("Connection not established. Use within context manager.")
+
         try:
             # Check if table exists and has data for this billing period
             # billing_period format is "YYYY-MM", convert to date for comparison
@@ -199,11 +198,13 @@ class ParquetExporter:
     def _export_to_parquet(
         self,
         billing_period: str,
-        vendor: str,
         file_path: Path,
         compression: str
     ) -> None:
         """Export billing data to Parquet file using DuckDB COPY command."""
+        if not self.conn:
+            raise RuntimeError("Connection not established. Use within context manager.")
+
         # billing_period format is "YYYY-MM", convert to date for filtering
         year, month = billing_period.split('-')
 
@@ -220,8 +221,11 @@ class ParquetExporter:
 
         self.conn.execute(query)
 
-    def get_available_billing_periods(self, vendor: str = "aws") -> List[str]:
+    def get_available_billing_periods(self, _vendor: str = "aws") -> List[str]:
         """Get list of billing periods that have loaded data available for export."""
+        if not self.conn:
+            raise RuntimeError("Connection not established. Use within context manager.")
+
         try:
             # Query actual DuckDB data to get available billing periods
             result = self.conn.execute(f"""
@@ -240,6 +244,9 @@ class ParquetExporter:
 
     def validate_table_exists(self) -> bool:
         """Validate that the table exists and has data."""
+        if not self.conn:
+            raise RuntimeError("Connection not established. Use within context manager.")
+
         try:
             result = self.conn.execute(f"SELECT COUNT(*) FROM {self.table_name}").fetchone()
             return result[0] > 0 if result else False

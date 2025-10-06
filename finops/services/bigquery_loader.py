@@ -13,13 +13,19 @@ class BigQueryLoader:
         self.parquet_dir = Path(parquet_dir)
 
         # Initialize BigQuery client
-        credentials = service_account.Credentials.from_service_account_file(
-            bigquery_config.credentials_path
-        )
-        self.client = bigquery.Client(
-            credentials=credentials,
-            project=bigquery_config.project_id
-        )
+        if bigquery_config.credentials_path:
+            credentials = service_account.Credentials.from_service_account_file(
+                bigquery_config.credentials_path
+            )
+            self.client = bigquery.Client(
+                credentials=credentials,
+                project=bigquery_config.project_id
+            )
+        else:
+            # Use Application Default Credentials (Cloud Run service account)
+            self.client = bigquery.Client(
+                project=bigquery_config.project_id
+            )
 
         # Construct table reference
         self.table_ref = f"{bigquery_config.project_id}.{bigquery_config.dataset_id}.{bigquery_config.table_id}"
