@@ -7,7 +7,8 @@ from finops.commands.aws.utils import (
     ensure_duckdb_path,
 )
 from finops.services.billing_extractor import BillingExtractorService
-from finops.services.monthly_pipeline import MonthlyPipelineOrchestrator
+from finops.services.duckdb_loader import DuckDBLoader
+from finops.services.parquet_exporter import ParquetExporter
 from finops.services.bigquery_loader import BigQueryLoader
 from finops.services.state_checker import StateChecker
 
@@ -55,37 +56,54 @@ def run_pipeline(config_path, args):
         return
 
     # Step 2: Extract billing files
-    print(f"\nStep 2/4: Extracting billing files...")
+    print(f"\nStep 2/5: Extracting billing files...")
     extractor = BillingExtractorService(config.aws)
     extract_stats = extractor.extract_billing_files(manifests, config.staging_dir)
     print(f"  Files downloaded: {extract_stats['files_downloaded']}")
     if extract_stats['errors'] > 0:
         print(f"  Errors: {extract_stats['errors']}")
 
-    # Step 3: Load to DuckDB and Export to Parquet (memory-optimized monthly pipeline)
-    print(f"\nStep 3/4: Processing billing data (monthly pipeline)...")
+    # Step 3: Load to DuckDB
+    print(f"\nStep 3/5: Loading to DuckDB...")
     ensure_duckdb_path(config)
 
-    pipeline = MonthlyPipelineOrchestrator(
-        duckdb_path=config.duckdb_path,
-        staging_dir=config.staging_dir,
-        parquet_dir=config.parquet_dir,
-        table_name="aws_billing_data"
-    )
+    # For in-memory DuckDB, we need to share the connection between loader and exporter
+    # Otherwise the exporter would open a new empty in-memory database
+    import duckdb
+    shared_conn = None
+    if config.duckdb_path == ":memory:":
+        shared_conn = duckdb.connect(":memory:")
 
-    pipeline_stats = pipeline.process_monthly(
-        manifests=manifests,
-        vendor="aws",
-        compression="snappy",
-        overwrite_parquet=False
-    )
+    try:
+        with DuckDBLoader(config.duckdb_path, connection=shared_conn) as loader:
+            load_stats = loader.load_billing_data_from_manifests(
+                manifests=manifests,
+                staging_dir=config.staging_dir,
+                table_name="aws_billing_data"
+            )
+            print(f"  Loaded: {load_stats['loaded_executions']} execution(s)")
+            print(f"  Total rows: {load_stats['total_rows']:,}")
 
-    print(f"  Months processed: {pipeline_stats['successful_months']}/{pipeline_stats['total_months']}")
-    print(f"  Total rows: {pipeline_stats['total_rows_loaded']:,}")
+        # Step 4: Export to Parquet (by execution with execution_id)
+        print(f"\nStep 4/5: Exporting to Parquet...")
+        with ParquetExporter(config.duckdb_path, config.parquet_dir, "aws_billing_data", connection=shared_conn) as exporter:
+            export_stats = exporter.export_billing_data_by_execution(
+                manifests,
+                vendor="aws",
+                overwrite=False,
+                compression="snappy"
+            )
+            exported = sum(1 for s in export_stats.values() if s == "exported")
+            skipped = sum(1 for s in export_stats.values() if s == "skipped")
+            print(f"  Exported: {exported}, Skipped: {skipped}")
+    finally:
+        # Close shared connection if we created one
+        if shared_conn:
+            shared_conn.close()
 
-    # Step 4: Load to BigQuery (only new execution_ids)
+    # Step 5: Load to BigQuery (only new execution_ids)
     if config.bigquery:
-        print(f"\nStep 4/4: Loading to BigQuery...")
+        print(f"\nStep 5/5: Loading to BigQuery...")
         bq_loader = BigQueryLoader(config.bigquery, config.parquet_dir)
         bq_stats = bq_loader.load_billing_data_by_execution(
             manifests,
@@ -96,17 +114,17 @@ def run_pipeline(config_path, args):
         skipped = sum(1 for s in bq_stats.values() if s == "skipped")
         print(f"  Loaded: {loaded}, Skipped: {skipped}")
     else:
-        print(f"\nStep 4/4: Skipping BigQuery (not configured)")
+        print(f"\nStep 5/5: Skipping BigQuery (not configured)")
 
     # Summary
     print(f"\nPipeline completed successfully!")
     print(f"\nSummary:")
     print(f"  Manifests: {len(manifests)}")
     print(f"  Billing periods: {', '.join(billing_periods)}")
-    print(f"  Rows loaded: {pipeline_stats['total_rows_loaded']:,}")
+    print(f"  Rows loaded: {load_stats['total_rows']:,}")
     if config.duckdb:
         print(f"\nData locations:")
-        print(f"  - DuckDB: {config.duckdb_path} (flushed between months)")
+        print(f"  - DuckDB: {config.duckdb_path}")
         print(f"  - Parquet: {config.parquet_dir}/")
     if config.bigquery:
         print(f"  - BigQuery: {config.bigquery.project_id}.{config.bigquery.dataset_id}.{config.bigquery.table_id}")

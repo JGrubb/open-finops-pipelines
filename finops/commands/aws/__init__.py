@@ -81,22 +81,6 @@ def setup_aws_parser(subparsers):
         "--end-date",
         help="End date for billing period (YYYY-MM format, e.g., 2024-12)"
     )
-    load_local_parser.add_argument(
-        "--no-monthly-pipeline",
-        action="store_true",
-        help="Disable memory-optimized monthly pipeline (load all months at once)"
-    )
-    load_local_parser.add_argument(
-        "--compression",
-        default="snappy",
-        choices=["snappy", "gzip", "lz4", "zstd"],
-        help="Parquet compression type for monthly pipeline (default: snappy)"
-    )
-    load_local_parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Overwrite existing Parquet files in monthly pipeline"
-    )
     load_local_parser.set_defaults(func=load_billing_local)
 
     # export-parquet command
